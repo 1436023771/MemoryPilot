@@ -7,7 +7,9 @@ DEFAULT_QA_PROMPT = ChatPromptTemplate.from_messages(
         # 系统消息：定义输出风格和长度约束。
         (
             "system",
-            "You are a concise assistant. Answer clearly in 3 bullet points or fewer.",
+            "You are a concise assistant. Answer clearly in 3 bullet points or fewer.\n"
+            "If retrieved long-term memory is provided, use it only when relevant.\n"
+            "Retrieved memory:\n{retrieved_context}",
         ),
         # 历史占位：由 RunnableWithMessageHistory 在运行时注入。
         MessagesPlaceholder(variable_name="history"),

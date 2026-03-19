@@ -16,6 +16,8 @@ A minimal project framework for building LangChain applications with clear struc
 │   ├── config.py
 │   ├── main.py
 │   └── prompts.py
+├── memory
+│   └── long_term_memory.txt
 └── tests
     └── test_smoke.py
 ```
@@ -58,6 +60,12 @@ TEMPERATURE=0.2
 python -m app.main "Explain retrieval-augmented generation in simple terms"
 ```
 
+Run read-only RAG demo (retrieve from local long-term memory file):
+
+```bash
+python -m app.main --use-rag --session-id demo-rag "请根据我的偏好给出建议"
+```
+
 Start multi-turn interactive chat:
 
 ```bash
@@ -83,3 +91,12 @@ pytest
 - It is scoped by `session_id`.
 - Restarting the Python process clears memory.
 - Two separate CLI runs do not share memory, even with the same `session_id`.
+
+## Read-Only Long-Term Memory (RAG Demo)
+
+- Memory source file: `memory/long_term_memory.txt`
+- This mode is read-only: it retrieves memory before answering, but does not write back.
+- CLI flags:
+    - `--use-rag`: enable retrieval
+    - `--memory-file`: custom memory file path
+    - `--top-k`: number of retrieved memory chunks
