@@ -66,6 +66,13 @@ Run read-only RAG demo (retrieve from local long-term memory file):
 python -m app.main --use-rag --session-id demo-rag "请根据我的偏好给出建议"
 ```
 
+Run writable long-term memory demo:
+
+```bash
+python -m app.main --use-rag --write-memory --show-memory-write "我叫小李，我喜欢简洁回答"
+python -m app.main --use-rag "我是谁？"
+```
+
 Start multi-turn interactive chat:
 
 ```bash
@@ -100,3 +107,30 @@ pytest
     - `--use-rag`: enable retrieval
     - `--memory-file`: custom memory file path
     - `--top-k`: number of retrieved memory chunks
+
+## Writable Long-Term Memory (Rule-Based Demo)
+
+- This mode extracts stable facts from user input and appends them to memory file.
+- Current extraction patterns include:
+    - `我叫X` / `我是X`
+    - `我喜欢X` / `我不喜欢X`
+    - `我的目标是X`
+- Fact format is normalized to structured lines:
+    - `用户姓名：X。`
+    - `用户喜欢：X。`
+    - `用户不喜欢：X。`
+    - `用户目标：X。`
+- Update strategy:
+    - `用户姓名` and `用户目标` are treated as single-value fields; new value replaces old value.
+    - `用户喜欢` and `用户不喜欢` are multi-value fields; deduplicated append.
+- CLI flags:
+    - `--write-memory`: enable write-back from current user turn
+    - `--show-memory-write`: print written facts for debugging
+
+Conflict update example:
+
+```bash
+python -m app.main --use-rag --write-memory --show-memory-write --memory-file memory/long_term_memory_demo.txt "我叫小李"
+python -m app.main --use-rag --write-memory --show-memory-write --memory-file memory/long_term_memory_demo.txt "我叫李华"
+python -m app.main --use-rag --memory-file memory/long_term_memory_demo.txt "我叫什么？"
+```
