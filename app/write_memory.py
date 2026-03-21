@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 from langchain_openai import ChatOpenAI
 
@@ -35,13 +36,14 @@ def _normalize_text(text: str) -> str:
 def _format_fact(key: str, value: str) -> str:
     """将结构化 key/value 映射为可读记忆句子。"""
     mapping = {
-        "name": f"用户姓名：{value}；我是{value}",
-        "like": f"用户喜欢：{value}；我喜欢{value}",
-        "dislike": f"用户不喜欢：{value}；我不喜欢{value}",
-        "goal": f"用户目标：{value}；我的目标是{value}",
-        "skill": f"用户技能：{value}；我会{value}",
+        "name": f"用户姓名：{value}",
+        "like": f"用户喜欢：{value}",
+        "dislike": f"用户不喜欢：{value}",
+        "goal": f"用户目标：{value}",
+        "skill": f"用户技能：{value}",
         "background": f"用户背景：{value}",
         "preference": f"用户偏好：{value}",
+        "message": f"用户提供的信息：{value}",
     }
     text = mapping.get(key, f"{key}：{value}")
     return _normalize_text(text)
@@ -186,6 +188,140 @@ def extract_candidate_facts(user_text: str) -> list[str]:
     """对外暴露文本事实提取接口，使用 LLM 驱动的提取。"""
     facts = _extract_facts_via_llm(user_text)
     return [fact.text for fact in facts]
+
+
+def _flatten_message_content(content: Any) -> str:
+    """将 LangChain message.content 统一转成文本。"""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n".join(parts).strip()
+    return str(content).strip()
+
+
+def _format_dialogue_for_memory(messages: list[Any], max_turns: int = 6) -> str:
+    """将最近多轮会话格式化为可供 LLM 总结的对话文本。"""
+    if not messages:
+        return ""
+
+    # 每轮通常包含 user+assistant 两条消息。
+    max_messages = max(2, max_turns * 2)
+    recent_messages = messages[-max_messages:]
+
+    lines: list[str] = []
+    for msg in recent_messages:
+        msg_type = getattr(msg, "type", "")
+        role = "用户" if msg_type == "human" else "助手" if msg_type == "ai" else "系统"
+        text = _flatten_message_content(getattr(msg, "content", ""))
+        if not text:
+            continue
+        lines.append(f"{role}: {text}")
+
+    return "\n".join(lines).strip()
+
+
+def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 6) -> list[str]:
+    """
+    从最近多轮对话中提取长期记忆：先让 LLM 总结历史，再抽取结构化事实。
+    若失败则返回空列表，由上层决定是否回退到单句提取。
+    """
+    dialogue_text = _format_dialogue_for_memory(messages, max_turns=max_turns)
+    if not dialogue_text:
+        return []
+
+    try:
+        settings = get_settings()
+        model = ChatOpenAI(
+            model=settings.model_name,
+            temperature=0.1,
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+        )
+
+        prompt = f"""你是长期记忆提取助手。下面是最近多轮对话，请先在心里总结，再提取值得长期保存的用户信息。
+
+对话历史：
+{dialogue_text}
+
+提取原则：
+1) 只提取和用户稳定特征相关的信息：姓名、长期目标、偏好、厌恶、技能、背景。
+2) 忽略一次性、临时性内容（例如当下时间、寒暄、重复确认语）。
+3) 如果同类信息冲突，优先选择更近一轮且表达更明确的内容。
+4) 请你将用户提供的非本人信息，全部以message形式记录。
+
+请仅返回 JSON 数组，每个元素格式：
+{{"key": "name|goal|like|dislike|skill|background|preference|message", "value": "...", "importance": 1-10}}
+
+没有可保存信息时返回 []。不要输出任何额外文本。"""
+
+        response = model.invoke(prompt)
+        if hasattr(response, "content"):
+            json_str = str(response.content).strip()
+        else:
+            json_str = str(response).strip()
+
+        if json_str.startswith("```json"):
+            json_str = json_str[7:]
+        if json_str.startswith("```"):
+            json_str = json_str[3:]
+        if json_str.endswith("```"):
+            json_str = json_str[:-3]
+        json_str = json_str.strip()
+
+        data = json.loads(json_str)
+        if not isinstance(data, list):
+            return []
+
+        key_mapping = {
+            "name": "name",
+            "user_name": "name",
+            "like": "like",
+            "preference": "preference",
+            "dislike": "dislike",
+            "goal": "goal",
+            "objective": "goal",
+            "skill": "skill",
+            "background": "background",
+        }
+
+        extracted: list[MemoryFact] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip().lower()
+            value = str(item.get("value", "")).strip()
+            if not key or not value:
+                continue
+            normalized_key = key_mapping.get(key, key)
+            extracted.append(
+                MemoryFact(
+                    key=normalized_key,
+                    value=value,
+                    text=_format_fact(normalized_key, value),
+                )
+            )
+
+        seen: set[tuple[str, str]] = set()
+        deduped: list[str] = []
+        for fact in extracted:
+            identity = (fact.key, fact.value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(fact.text)
+
+        return deduped
+    except (json.JSONDecodeError, ValueError, TypeError, Exception) as e:
+        print(f"[Warning] Dialogue memory extraction failed ({e}), skipping history extraction")
+        return []
 
 
 def _is_conflicting_line(line: str, incoming_keys: set[str]) -> bool:

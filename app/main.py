@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 
 from app.chains import build_qa_chain
+from app.chains import get_session_history
 from app.config import get_settings
 from app.read_only_memory import load_memory_chunks, retrieve_memory_context
 from app.sqlite_memory import (
@@ -9,7 +10,11 @@ from app.sqlite_memory import (
     retrieve_memory_context_hybrid_from_sqlite,
     write_facts_to_sqlite,
 )
-from app.write_memory import append_memory_facts, extract_candidate_facts
+from app.write_memory import (
+    append_memory_facts,
+    extract_candidate_facts,
+    extract_candidate_facts_from_dialogue,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +95,7 @@ def _load_memory_chunks(memory_backend: str, memory_file: Path, memory_db: Path)
 
 def _maybe_write_long_term_memory(
     question: str,
+    session_id: str,
     memory_file: Path,
     memory_db: Path,
     memory_backend: str,
@@ -100,7 +106,11 @@ def _maybe_write_long_term_memory(
     if not write_memory:
         return
 
-    candidate_facts = extract_candidate_facts(question)
+    history = get_session_history(session_id)
+    candidate_facts = extract_candidate_facts_from_dialogue(history.messages, max_turns=6)
+    if not candidate_facts:
+        candidate_facts = extract_candidate_facts(question)
+
     if memory_backend == "sqlite":
         written_facts = write_facts_to_sqlite(memory_db, candidate_facts)
     else:
@@ -146,6 +156,7 @@ def run_single_turn(
 
     _maybe_write_long_term_memory(
         question=question,
+        session_id=session_id,
         memory_file=memory_file,
         memory_db=memory_db,
         memory_backend=memory_backend,
@@ -197,6 +208,7 @@ def run_interactive(
 
         _maybe_write_long_term_memory(
             question=user_input,
+            session_id=session_id,
             memory_file=memory_file,
             memory_db=memory_db,
             memory_backend=memory_backend,
