@@ -4,6 +4,11 @@ from pathlib import Path
 from app.chains import build_qa_chain
 from app.config import get_settings
 from app.read_only_memory import load_memory_chunks, retrieve_memory_context
+from app.sqlite_memory import (
+    load_memory_chunks_from_sqlite,
+    retrieve_memory_context_hybrid_from_sqlite,
+    write_facts_to_sqlite,
+)
 from app.write_memory import append_memory_facts, extract_candidate_facts
 
 
@@ -25,7 +30,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--memory-file",
         default="memory/long_term_memory.txt",
-        help="Read-only long-term memory file path",
+        help="Long-term memory text file path (used when --memory-backend=txt)",
+    )
+    parser.add_argument(
+        "--memory-backend",
+        choices=["sqlite", "txt"],
+        default="sqlite",
+        help="Long-term memory storage backend",
+    )
+    parser.add_argument(
+        "--memory-db",
+        default="memory/long_term_memory.db",
+        help="SQLite database path (used when --memory-backend=sqlite)",
     )
     parser.add_argument(
         "--top-k",
@@ -46,16 +62,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_retrieved_context(question: str, memory_chunks, use_rag: bool, top_k: int) -> str:
+def _build_retrieved_context(
+    question: str,
+    memory_chunks,
+    use_rag: bool,
+    top_k: int,
+    memory_backend: str,
+    memory_db: Path,
+) -> str:
     """按需从只读记忆中检索上下文。"""
     if not use_rag:
         return ""
+
+    # 第三阶段：SQLite 默认采用混合检索（关键词 + 向量相似度）。
+    if memory_backend == "sqlite":
+        return retrieve_memory_context_hybrid_from_sqlite(memory_db, question, top_k=top_k)
+
     return retrieve_memory_context(question, memory_chunks, top_k=top_k)
+
+
+def _load_memory_chunks(memory_backend: str, memory_file: Path, memory_db: Path):
+    """按后端类型加载长期记忆片段。"""
+    if memory_backend == "sqlite":
+        return load_memory_chunks_from_sqlite(memory_db)
+    return load_memory_chunks(memory_file)
 
 
 def _maybe_write_long_term_memory(
     question: str,
     memory_file: Path,
+    memory_db: Path,
+    memory_backend: str,
     write_memory: bool,
     show_memory_write: bool,
 ):
@@ -64,7 +101,11 @@ def _maybe_write_long_term_memory(
         return
 
     candidate_facts = extract_candidate_facts(question)
-    written_facts = append_memory_facts(memory_file, candidate_facts)
+    if memory_backend == "sqlite":
+        written_facts = write_facts_to_sqlite(memory_db, candidate_facts)
+    else:
+        written_facts = append_memory_facts(memory_file, candidate_facts)
+
     if show_memory_write and written_facts:
         print("[Memory] wrote facts:")
         for fact in written_facts:
@@ -79,6 +120,8 @@ def run_single_turn(
     top_k: int,
     write_memory: bool,
     memory_file: Path,
+    memory_db: Path,
+    memory_backend: str,
     show_memory_write: bool,
 ) -> None:
     # 单轮模式：构建链后仅调用一次。
@@ -90,6 +133,8 @@ def run_single_turn(
         memory_chunks=memory_chunks,
         use_rag=use_rag,
         top_k=top_k,
+        memory_backend=memory_backend,
+        memory_db=memory_db,
     )
 
     # 通过 configurable.session_id 指定记忆上下文。
@@ -102,6 +147,8 @@ def run_single_turn(
     _maybe_write_long_term_memory(
         question=question,
         memory_file=memory_file,
+        memory_db=memory_db,
+        memory_backend=memory_backend,
         write_memory=write_memory,
         show_memory_write=show_memory_write,
     )
@@ -114,6 +161,8 @@ def run_interactive(
     top_k: int,
     write_memory: bool,
     memory_file: Path,
+    memory_db: Path,
+    memory_backend: str,
     show_memory_write: bool,
 ) -> None:
     # 交互模式：同一进程内循环对话，可连续复用短期记忆。
@@ -136,6 +185,8 @@ def run_interactive(
             memory_chunks=memory_chunks,
             use_rag=use_rag,
             top_k=top_k,
+            memory_backend=memory_backend,
+            memory_db=memory_db,
         )
 
         response = chain.invoke(
@@ -147,12 +198,14 @@ def run_interactive(
         _maybe_write_long_term_memory(
             question=user_input,
             memory_file=memory_file,
+            memory_db=memory_db,
+            memory_backend=memory_backend,
             write_memory=write_memory,
             show_memory_write=show_memory_write,
         )
 
         # 写入后刷新本地缓存，使下一轮检索可读到新记忆。
-        memory_chunks = load_memory_chunks(memory_file)
+        memory_chunks = _load_memory_chunks(memory_backend, memory_file, memory_db)
 
 
 def main() -> None:
@@ -160,7 +213,8 @@ def main() -> None:
     args = parse_args()
 
     memory_file = Path(args.memory_file)
-    memory_chunks = load_memory_chunks(memory_file)
+    memory_db = Path(args.memory_db)
+    memory_chunks = _load_memory_chunks(args.memory_backend, memory_file, memory_db)
 
     if args.interactive:
         run_interactive(
@@ -170,6 +224,8 @@ def main() -> None:
             top_k=args.top_k,
             write_memory=args.write_memory,
             memory_file=memory_file,
+            memory_db=memory_db,
+            memory_backend=args.memory_backend,
             show_memory_write=args.show_memory_write,
         )
         return
@@ -183,6 +239,8 @@ def main() -> None:
         top_k=args.top_k,
         write_memory=args.write_memory,
         memory_file=memory_file,
+        memory_db=memory_db,
+        memory_backend=args.memory_backend,
         show_memory_write=args.show_memory_write,
     )
 

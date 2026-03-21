@@ -19,6 +19,10 @@ agent/
 # Local environment files
 .env
 
+# Local memory database files
+memory/*.db
+memory/*.db-*
+
 # IDE files
 .vscode/
 .DS_Store

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from pathlib import Path
+
+from langchain_openai import ChatOpenAI
+
+from app.config import get_settings
 
 
 @dataclass(frozen=True)
@@ -34,12 +39,116 @@ def _format_fact(key: str, value: str) -> str:
         "like": f"用户喜欢：{value}；我喜欢{value}",
         "dislike": f"用户不喜欢：{value}；我不喜欢{value}",
         "goal": f"用户目标：{value}；我的目标是{value}",
+        "skill": f"用户技能：{value}；我会{value}",
+        "background": f"用户背景：{value}",
+        "preference": f"用户偏好：{value}",
     }
-    return _normalize_text(mapping[key])
+    text = mapping.get(key, f"{key}：{value}")
+    return _normalize_text(text)
 
 
-def _extract_structured_facts(user_text: str) -> list[MemoryFact]:
-    """从用户输入提取结构化事实。"""
+def _extract_facts_via_llm(user_text: str) -> list[MemoryFact]:
+    """
+    使用 LLM 从用户输入中提取重要信息及其记忆价值。
+    返回 MemoryFact 列表；如果 LLM 解析失败，回退到正则提取。
+    """
+    try:
+        settings = get_settings()
+        model = ChatOpenAI(
+            model=settings.model_name,
+            temperature=0.1,  # 低温度确保稳定的JSON输出
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+        )
+
+        prompt = f"""你是一个记忆提取助手。分析用户的输入，提取关于用户的重要信息。
+
+用户输入：
+{user_text}
+
+请以JSON格式返回提取的信息。JSON应该包含数组，每个元素代表一个信息片段。
+每个元素包含：
+- key: 信息类别（如 'name', 'like', 'dislike', 'goal', 'skill', 'background', 'preference' 等）
+- value: 具体的信息内容（尽可能简洁）
+- importance: 重要程度（1-10，10最重要）
+
+只返回JSON，格式如下示例：
+[
+  {{"key": "name", "value": "小李", "importance": 10}},
+  {{"key": "like", "value": "简洁回答", "importance": 8}}
+]
+
+如果没有重要信息，返回空数组 []"""
+
+        response = model.invoke(prompt)
+        
+        # 尝试从响应中解析JSON
+        # LLM 返回 AIMessage 对象，需要提取 content
+        if hasattr(response, "content"):
+            json_str = response.content.strip()
+        else:
+            json_str = str(response).strip()
+        # 处理可能的markdown代码块
+        if json_str.startswith("```json"):
+            json_str = json_str[7:]
+        if json_str.startswith("```"):
+            json_str = json_str[3:]
+        if json_str.endswith("```"):
+            json_str = json_str[:-3]
+        json_str = json_str.strip()
+        
+        data = json.loads(json_str)
+        if not isinstance(data, list):
+            data = []
+
+        extracted: list[MemoryFact] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key", "").strip().lower()
+            value = item.get("value", "").strip()
+            if not key or not value:
+                continue
+            
+            # 归一化key：允许多种名称
+            key_mapping = {
+                "name": "name",
+                "user_name": "name",
+                "like": "like",
+                "preference": "like",
+                "dislike": "dislike",
+                "goal": "goal",
+                "objective": "goal",
+                "skill": "skill",
+                "background": "background",
+            }
+            normalized_key = key_mapping.get(key, key)
+            
+            text = _format_fact(normalized_key, value)
+            extracted.append(MemoryFact(key=normalized_key, value=value, text=text))
+
+        # 去重并保持顺序
+        seen: set[tuple[str, str]] = set()
+        deduped: list[MemoryFact] = []
+        for fact in extracted:
+            identity = (fact.key, fact.value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(fact)
+
+        return deduped
+
+    except (json.JSONDecodeError, ValueError, TypeError, Exception) as e:
+        # LLM 解析失败时，输出警告并回退到正则
+        print(f"[Warning] LLM extraction failed ({e}), falling back to regex extraction")
+        return _extract_structured_facts_regex(user_text)
+
+
+def _extract_structured_facts_regex(user_text: str) -> list[MemoryFact]:
+    """
+    原有的正则提取方式，作为 LLM 提取的备选方案。
+    """
     patterns: list[tuple[re.Pattern[str], str]] = [
         (re.compile(r"我叫\s*([^，。,.!?！？\s]+)"), "name"),
         (re.compile(r"我是\s*([^，。,.!?！？\s]+)"), "name"),
@@ -74,8 +183,9 @@ def _extract_structured_facts(user_text: str) -> list[MemoryFact]:
 
 
 def extract_candidate_facts(user_text: str) -> list[str]:
-    """对外暴露文本事实提取接口。"""
-    return [fact.text for fact in _extract_structured_facts(user_text)]
+    """对外暴露文本事实提取接口，使用 LLM 驱动的提取。"""
+    facts = _extract_facts_via_llm(user_text)
+    return [fact.text for fact in facts]
 
 
 def _is_conflicting_line(line: str, incoming_keys: set[str]) -> bool:
@@ -99,140 +209,129 @@ def _is_conflicting_line(line: str, incoming_keys: set[str]) -> bool:
     return False
 
 
-def _parse_line_to_fact(line: str) -> MemoryFact | None:
-    """将现有记忆行解析为结构化事实。"""
-    normalized = _normalize_text(line)
-    if not normalized:
-        return None
-
-    if normalized.startswith("用户姓名："):
-        value = normalized.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
-        return MemoryFact(key="name", value=value, text=_format_fact("name", value))
-    if normalized.startswith("用户喜欢："):
-        value = normalized.removeprefix("用户喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-        return MemoryFact(key="like", value=value, text=_format_fact("like", value))
-    if normalized.startswith("用户不喜欢："):
-        value = normalized.removeprefix("用户不喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-        return MemoryFact(key="dislike", value=value, text=_format_fact("dislike", value))
-    if normalized.startswith("用户目标："):
-        value = normalized.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
-        return MemoryFact(key="goal", value=value, text=_format_fact("goal", value))
-
-    legacy_name = re.fullmatch(r"我是([^，。,.!?！？\s]+)。?", normalized)
-    if legacy_name:
-        value = legacy_name.group(1).strip()
-        return MemoryFact(key="name", value=value, text=_format_fact("name", value))
-
-    legacy_goal = re.fullmatch(r"我的目标是(.+?)。?", normalized)
-    if legacy_goal:
-        value = legacy_goal.group(1).strip()
-        return MemoryFact(key="goal", value=value, text=_format_fact("goal", value))
-
-    return None
-
-
-def append_memory_facts(memory_file: Path, facts: list[str]) -> list[str]:
-    """将新事实写入长期记忆，并对冲突字段执行更新。"""
-    if not facts:
+def append_memory_facts(memory_file: Path, candidate_facts: list[str]) -> list[str]:
+    """将候选事实对象存档，产生已写入的事实。
+    
+    接受多种输入格式：
+    - 已格式化的事实（如 "用户姓名：小李；我是小李。"）
+    - 原始用户输入（如 "我喜欢Python"）
+    - 两者混合
+    """
+    if not candidate_facts:
         return []
 
-    memory_file.parent.mkdir(parents=True, exist_ok=True)
+    if not memory_file.exists():
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # 入参 facts 可能是旧格式文本，这里通过结构化提取统一处理。
-    structured_facts: list[MemoryFact] = []
-    for text in facts:
-        normalized = _normalize_text(text)
-        if not normalized:
+    # 将输入规范化为 MemoryFact 列表
+    struct_facts: list[MemoryFact] = []
+    for fact_str in candidate_facts:
+        if not fact_str or not fact_str.strip():
             continue
-
+        
+        normalized = _normalize_text(fact_str)
+        
+        # 尝试解析为已格式化的事实
         if normalized.startswith("用户姓名："):
             value = normalized.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            structured_facts.append(MemoryFact(key="name", value=value, text=_format_fact("name", value)))
+            if value:
+                struct_facts.append(MemoryFact(key="name", value=value, text=_format_fact("name", value)))
         elif normalized.startswith("用户喜欢："):
             value = normalized.removeprefix("用户喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            structured_facts.append(MemoryFact(key="like", value=value, text=_format_fact("like", value)))
+            if value:
+                struct_facts.append(MemoryFact(key="like", value=value, text=_format_fact("like", value)))
         elif normalized.startswith("用户不喜欢："):
             value = normalized.removeprefix("用户不喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            structured_facts.append(MemoryFact(key="dislike", value=value, text=_format_fact("dislike", value)))
+            if value:
+                struct_facts.append(MemoryFact(key="dislike", value=value, text=_format_fact("dislike", value)))
         elif normalized.startswith("用户目标："):
             value = normalized.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            structured_facts.append(MemoryFact(key="goal", value=value, text=_format_fact("goal", value)))
+            if value:
+                struct_facts.append(MemoryFact(key="goal", value=value, text=_format_fact("goal", value)))
         else:
-            # 对自然语言事实再跑一次规则提取，兼容旧调用方式。
-            structured_facts.extend(_extract_structured_facts(normalized))
+            # 尝试用正则提取
+            extracted = _extract_structured_facts_regex(normalized)
+            struct_facts.extend(extracted)
 
-    if not structured_facts:
+    if not struct_facts:
         return []
 
-    # 对本轮新事实去重（同 key+value）。
-    seen_incoming: set[tuple[str, str]] = set()
-    incoming: list[MemoryFact] = []
-    for fact in structured_facts:
-        identity = (fact.key, fact.value)
-        if identity in seen_incoming:
-            continue
-        seen_incoming.add(identity)
-        incoming.append(fact)
+    # 读取现有文件
+    existing_content = memory_file.read_text(encoding="utf8") if memory_file.exists() else ""
+    existing_lines = existing_content.strip().split("\n") if existing_content.strip() else []
 
-    if memory_file.exists():
-        lines = memory_file.read_text(encoding="utf-8").splitlines()
-    else:
-        lines = []
-
-    existing_single_values: dict[str, str] = {}
-    for line in lines:
+    # 从原始行中提取已存在的事实
+    existing_facts: dict[tuple[str, str], str] = {}  # (key, value) -> full_line
+    existing_facts_list: list[MemoryFact] = []
+    for line in existing_lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        parsed = _parse_line_to_fact(stripped)
-        if parsed and parsed.key in _SINGLE_VALUE_KEYS:
-            existing_single_values[parsed.key] = parsed.value
+        
+        # 尝试解析为 MemoryFact
+        if stripped.startswith("用户姓名："):
+            value = stripped.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
+            if value:
+                existing_facts[("name", value)] = stripped
+                existing_facts_list.append(MemoryFact(key="name", value=value, text=stripped))
+        elif stripped.startswith("用户喜欢："):
+            value = stripped.removeprefix("用户喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
+            if value:
+                existing_facts[("like", value)] = stripped
+                existing_facts_list.append(MemoryFact(key="like", value=value, text=stripped))
+        elif stripped.startswith("用户不喜欢："):
+            value = stripped.removeprefix("用户不喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
+            if value:
+                existing_facts[("dislike", value)] = stripped
+                existing_facts_list.append(MemoryFact(key="dislike", value=value, text=stripped))
+        elif stripped.startswith("用户目标："):
+            value = stripped.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
+            if value:
+                existing_facts[("goal", value)] = stripped
+                existing_facts_list.append(MemoryFact(key="goal", value=value, text=stripped))
 
-    # 单值字段如果值未变化，不需要触发更新。
-    filtered_incoming: list[MemoryFact] = []
-    for fact in incoming:
-        if fact.key in _SINGLE_VALUE_KEYS and existing_single_values.get(fact.key) == fact.value:
-            continue
-        filtered_incoming.append(fact)
-    incoming = filtered_incoming
+    # 提取本轮中要写入的 key 集群及其新值
+    incoming_keys: set[str] = {fact.key for fact in struct_facts}
+    incoming_key_values: dict[str, str] = {fact.key: fact.value for fact in struct_facts}
 
-    if not incoming:
-        return []
-
-    incoming_keys = {fact.key for fact in incoming}
-
-    # 读取现有行，剔除冲突项，并收集已有事实用于去重。
-    cleaned_lines: list[str] = []
-    existing_fact_lines: set[str] = set()
-    for line in lines:
-        if _is_conflicting_line(line, incoming_keys):
-            continue
-        cleaned_lines.append(line)
+    # 按冲突规则改写旧记忆（仅删除值发生变化的行）
+    filtered_lines: list[str] = []
+    for line in existing_lines:
+        should_keep = True
         stripped = line.strip()
+        
         if stripped and not stripped.startswith("#"):
-            existing_fact_lines.add(_normalize_text(stripped))
+            # 检查这一行是否需要被替换（值发生变化）
+            if stripped.startswith("用户姓名："):
+                old_value = stripped.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
+                if "name" in incoming_keys and incoming_key_values.get("name") != old_value:
+                    should_keep = False
+            elif stripped.startswith("用户目标："):
+                old_value = stripped.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
+                if "goal" in incoming_keys and incoming_key_values.get("goal") != old_value:
+                    should_keep = False
+        
+        if should_keep:
+            filtered_lines.append(line)
 
     newly_written: list[str] = []
-    for fact in incoming:
-        if fact.text in existing_fact_lines:
-            continue
-        newly_written.append(fact.text)
-        existing_fact_lines.add(fact.text)
+    for fact in struct_facts:
+        # 检查 (key, value) 对是否已存在
+        if (fact.key, fact.value) not in existing_facts:
+            newly_written.append(fact.text)
 
-    if not newly_written:
-        # 即使无新增，如果触发了冲突清理，也需要回写文件。
-        if cleaned_lines != lines:
-            final_text = "\n".join(cleaned_lines).rstrip() + "\n"
-            memory_file.write_text(final_text, encoding="utf-8")
+    if not newly_written and filtered_lines == existing_lines:
+        # 无任何变化
         return []
 
-    output_lines = cleaned_lines[:]
-    if output_lines and output_lines[-1].strip():
-        output_lines.append("")
-    output_lines.append("# 自动写入记忆")
-    output_lines.extend(newly_written)
+    # 拼接最终输出
+    new_content = "\n".join(filtered_lines)
+    if filtered_lines and new_content:
+        new_content += "\n"
+    if newly_written:
+        new_content += "\n".join(newly_written)
 
-    final_text = "\n".join(output_lines).rstrip() + "\n"
-    memory_file.write_text(final_text, encoding="utf-8")
+    # 回写文件
+    memory_file.write_text(new_content.strip() + "\n", encoding="utf8")
 
     return newly_written

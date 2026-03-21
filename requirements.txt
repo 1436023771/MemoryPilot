@@ -2,3 +2,7 @@ langchain>=0.3.0
 langchain-openai>=0.2.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
+# 向量化和语义检索依赖（轻量级方案，避免PyTorch）
+scikit-learn>=1.0.0
+chromadb>=0.4.0
+jieba>=0.42.1

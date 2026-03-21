@@ -66,17 +66,23 @@ Run read-only RAG demo (retrieve from local long-term memory file):
 python -m app.main --use-rag --session-id demo-rag "请根据我的偏好给出建议"
 ```
 
-Run writable long-term memory demo:
+Run writable long-term memory demo (SQLite backend):
 
 ```bash
-python -m app.main --use-rag --write-memory --show-memory-write "我叫小李，我喜欢简洁回答"
-python -m app.main --use-rag "我是谁？"
+python -m app.main --memory-backend sqlite --use-rag --write-memory --show-memory-write "我叫小李，我喜欢简洁回答"
+python -m app.main --memory-backend sqlite --use-rag "我是谁？"
 ```
 
 Start multi-turn interactive chat:
 
 ```bash
 python -m app.main --interactive --session-id demo-chat
+```
+
+Start desktop chat window (GUI, defaults to short-term + long-term memory):
+
+```bash
+python -m app.gui_chat
 ```
 
 5. Run tests:
@@ -101,11 +107,13 @@ pytest
 
 ## Read-Only Long-Term Memory (RAG Demo)
 
-- Memory source file: `memory/long_term_memory.txt`
+- Memory source can be SQLite or text file (SQLite is default).
 - This mode is read-only: it retrieves memory before answering, but does not write back.
 - CLI flags:
     - `--use-rag`: enable retrieval
-    - `--memory-file`: custom memory file path
+    - `--memory-backend`: choose `sqlite` (default) or `txt`
+    - `--memory-db`: custom sqlite db path
+    - `--memory-file`: custom text memory path (when backend is `txt`)
     - `--top-k`: number of retrieved memory chunks
 
 ## Writable Long-Term Memory (Rule-Based Demo)
@@ -130,7 +138,7 @@ pytest
 Conflict update example:
 
 ```bash
-python -m app.main --use-rag --write-memory --show-memory-write --memory-file memory/long_term_memory_demo.txt "我叫小李"
-python -m app.main --use-rag --write-memory --show-memory-write --memory-file memory/long_term_memory_demo.txt "我叫李华"
-python -m app.main --use-rag --memory-file memory/long_term_memory_demo.txt "我叫什么？"
+python -m app.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag --write-memory --show-memory-write "我叫小李"
+python -m app.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag --write-memory --show-memory-write "我叫李华"
+python -m app.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag "我叫什么？"
 ```
