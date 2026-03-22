@@ -194,13 +194,14 @@ class ChatWindow:
         if not candidate_facts:
             candidate_facts = extract_candidate_facts(question)
 
+        extracted_texts = [fact.text for fact in candidate_facts]
         if self.memory_backend == "sqlite":
             written = write_facts_to_sqlite(self.memory_db, candidate_facts)
-            return candidate_facts, written
+            return extracted_texts, written
 
         written = append_memory_facts(self.memory_file, candidate_facts)
         self.memory_chunks = load_memory_chunks(self.memory_file)
-        return candidate_facts, written
+        return extracted_texts, written
 
     def _on_send(self, _event=None) -> None:
         user_input = self.input_var.get().strip()

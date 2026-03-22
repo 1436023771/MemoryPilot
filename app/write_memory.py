@@ -9,6 +9,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
+from app.fallback import extract_candidate_facts_single_turn, extract_structured_facts_regex
 
 
 @dataclass(frozen=True)
@@ -49,145 +50,15 @@ def _format_fact(key: str, value: str) -> str:
     return _normalize_text(text)
 
 
-def _extract_facts_via_llm(user_text: str) -> list[MemoryFact]:
-    """
-    使用 LLM 从用户输入中提取重要信息及其记忆价值。
-    返回 MemoryFact 列表；如果 LLM 解析失败，回退到正则提取。
-    """
-    try:
-        settings = get_settings()
-        model = ChatOpenAI(
-            model=settings.model_name,
-            temperature=0.1,  # 低温度确保稳定的JSON输出
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-        )
 
-        prompt = f"""你是一个记忆提取助手。分析用户的输入，提取关于用户的重要信息。
-
-用户输入：
-{user_text}
-
-请以JSON格式返回提取的信息。JSON应该包含数组，每个元素代表一个信息片段。
-每个元素包含：
-- key: 信息类别（如 'name', 'like', 'dislike', 'goal', 'skill', 'background', 'preference' 等）
-- value: 具体的信息内容（尽可能简洁）
-- importance: 重要程度（1-10，10最重要）
-
-只返回JSON，格式如下示例：
-[
-  {{"key": "name", "value": "小李", "importance": 10}},
-  {{"key": "like", "value": "简洁回答", "importance": 8}}
-]
-
-如果没有重要信息，返回空数组 []"""
-
-        response = model.invoke(prompt)
-        
-        # 尝试从响应中解析JSON
-        # LLM 返回 AIMessage 对象，需要提取 content
-        if hasattr(response, "content"):
-            json_str = response.content.strip()
-        else:
-            json_str = str(response).strip()
-        # 处理可能的markdown代码块
-        if json_str.startswith("```json"):
-            json_str = json_str[7:]
-        if json_str.startswith("```"):
-            json_str = json_str[3:]
-        if json_str.endswith("```"):
-            json_str = json_str[:-3]
-        json_str = json_str.strip()
-        
-        data = json.loads(json_str)
-        if not isinstance(data, list):
-            data = []
-
-        extracted: list[MemoryFact] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            key = item.get("key", "").strip().lower()
-            value = item.get("value", "").strip()
-            if not key or not value:
-                continue
-            
-            # 归一化key：允许多种名称
-            key_mapping = {
-                "name": "name",
-                "user_name": "name",
-                "like": "like",
-                "preference": "like",
-                "dislike": "dislike",
-                "goal": "goal",
-                "objective": "goal",
-                "skill": "skill",
-                "background": "background",
-            }
-            normalized_key = key_mapping.get(key, key)
-            
-            text = _format_fact(normalized_key, value)
-            extracted.append(MemoryFact(key=normalized_key, value=value, text=text))
-
-        # 去重并保持顺序
-        seen: set[tuple[str, str]] = set()
-        deduped: list[MemoryFact] = []
-        for fact in extracted:
-            identity = (fact.key, fact.value)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            deduped.append(fact)
-
-        return deduped
-
-    except (json.JSONDecodeError, ValueError, TypeError, Exception) as e:
-        # LLM 解析失败时，输出警告并回退到正则
-        print(f"[Warning] LLM extraction failed ({e}), falling back to regex extraction")
-        return _extract_structured_facts_regex(user_text)
-
-
-def _extract_structured_facts_regex(user_text: str) -> list[MemoryFact]:
-    """
-    原有的正则提取方式，作为 LLM 提取的备选方案。
-    """
-    patterns: list[tuple[re.Pattern[str], str]] = [
-        (re.compile(r"我叫\s*([^，。,.!?！？\s]+)"), "name"),
-        (re.compile(r"我是\s*([^，。,.!?！？\s]+)"), "name"),
-        (re.compile(r"我喜欢\s*([^。！？!?]+)"), "like"),
-        (re.compile(r"我偏好\s*([^。！？!?]+)"), "like"),
-        (re.compile(r"我不喜欢\s*([^。！？!?]+)"), "dislike"),
-        (re.compile(r"我的目标是\s*([^。！？!?]+)"), "goal"),
-    ]
-
-    extracted: list[MemoryFact] = []
-    for pattern, key in patterns:
-        for match in pattern.finditer(user_text):
-            value = _normalize_text(match.group(1))
-            if not value:
-                continue
-            value = value.rstrip("。.!！?？").strip()
-            if not value:
-                continue
-            text = _format_fact(key, value)
-            extracted.append(MemoryFact(key=key, value=value, text=text))
-
-    # 去重并保持顺序
-    seen: set[tuple[str, str]] = set()
-    deduped: list[MemoryFact] = []
-    for fact in extracted:
-        identity = (fact.key, fact.value)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        deduped.append(fact)
-    return deduped
-
-
-def extract_candidate_facts(user_text: str) -> list[str]:
-    """对外暴露文本事实提取接口，使用 LLM 驱动的提取。"""
-    facts = _extract_facts_via_llm(user_text)
-    return [fact.text for fact in facts]
+def extract_candidate_facts(user_text: str) -> list[MemoryFact]:
+    """对外暴露文本事实提取接口，当前仅作为 fallback 使用。"""
+    facts = extract_candidate_facts_single_turn(
+        user_text=user_text,
+        format_fact=_format_fact,
+        normalize_text=_normalize_text,
+    )
+    return [MemoryFact(key=key, value=value, text=text) for key, value, text in facts]
 
 
 def _flatten_message_content(content: Any) -> str:
@@ -228,10 +99,11 @@ def _format_dialogue_for_memory(messages: list[Any], max_turns: int = 6) -> str:
     return "\n".join(lines).strip()
 
 
-def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 6) -> list[str]:
+def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 6) -> list[MemoryFact]:
     """
     从最近多轮对话中提取长期记忆：先让 LLM 总结历史，再抽取结构化事实。
     若失败则返回空列表，由上层决定是否回退到单句提取。
+    返回 MemoryFact 对象以保留原始 key/value 对。
     """
     dialogue_text = _format_dialogue_for_memory(messages, max_turns=max_turns)
     if not dialogue_text:
@@ -246,16 +118,21 @@ def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 
             base_url=settings.base_url,
         )
 
-        prompt = f"""你是长期记忆提取助手。下面是最近多轮对话，请先在心里总结，再提取值得长期保存的用户信息。
+        prompt = f"""你是长期记忆提取助手。下面是最近多轮对话，你的任务是从用户说出的话中提取关于【用户本人】的重要信息。
 
 对话历史：
 {dialogue_text}
 
-提取原则：
-1) 只提取和用户稳定特征相关的信息：姓名、长期目标、偏好、厌恶、技能、背景。
-2) 忽略一次性、临时性内容（例如当下时间、寒暄、重复确认语）。
-3) 如果同类信息冲突，优先选择更近一轮且表达更明确的内容。
-4) 请你将用户提供的非本人信息，全部以message形式记录。
+提取规则（很重要！）：
+1) 【只】从"用户:"部分提取用户本人的信息，不要从"助手:"提取。
+2) 提取的必须是关于用户本身的事实：姓名、长期目标、个人偏好、特殊厌恶、拥有的技能、背景信息
+3) 严格忽略助手提供的知识、检索结果、推荐、建议等【非用户信息】
+4) 严格忽略一次性、临时性内容（如"这次请求"、"当前问题"、"现在的时间"等）
+5) 严格忽略寒暄、重复确认、感谢等社交语言
+6) 如果用户提到了关于第三方的信息，记为"message"类型
+7) 遇到矛盾时，优先使用用户最新、最明确的表述
+
+判断标准：信息必须满足"这是用户本人说出的关于自己的事实"，否则不提取。
 
 请仅返回 JSON 数组，每个元素格式：
 {{"key": "name|goal|like|dislike|skill|background|preference|message", "value": "...", "importance": 1-10}}
@@ -310,13 +187,13 @@ def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 
             )
 
         seen: set[tuple[str, str]] = set()
-        deduped: list[str] = []
+        deduped: list[MemoryFact] = []
         for fact in extracted:
             identity = (fact.key, fact.value)
             if identity in seen:
                 continue
             seen.add(identity)
-            deduped.append(fact.text)
+            deduped.append(fact)
 
         return deduped
     except (json.JSONDecodeError, ValueError, TypeError, Exception) as e:
@@ -345,50 +222,15 @@ def _is_conflicting_line(line: str, incoming_keys: set[str]) -> bool:
     return False
 
 
-def append_memory_facts(memory_file: Path, candidate_facts: list[str]) -> list[str]:
-    """将候选事实对象存档，产生已写入的事实。
-    
-    接受多种输入格式：
-    - 已格式化的事实（如 "用户姓名：小李；我是小李。"）
-    - 原始用户输入（如 "我喜欢Python"）
-    - 两者混合
-    """
+def append_memory_facts(memory_file: Path, candidate_facts: list[MemoryFact]) -> list[str]:
+    """将候选事实对象存档，产生已写入事实的显示文本。"""
     if not candidate_facts:
         return []
 
     if not memory_file.exists():
         memory_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # 将输入规范化为 MemoryFact 列表
-    struct_facts: list[MemoryFact] = []
-    for fact_str in candidate_facts:
-        if not fact_str or not fact_str.strip():
-            continue
-        
-        normalized = _normalize_text(fact_str)
-        
-        # 尝试解析为已格式化的事实
-        if normalized.startswith("用户姓名："):
-            value = normalized.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                struct_facts.append(MemoryFact(key="name", value=value, text=_format_fact("name", value)))
-        elif normalized.startswith("用户喜欢："):
-            value = normalized.removeprefix("用户喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                struct_facts.append(MemoryFact(key="like", value=value, text=_format_fact("like", value)))
-        elif normalized.startswith("用户不喜欢："):
-            value = normalized.removeprefix("用户不喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                struct_facts.append(MemoryFact(key="dislike", value=value, text=_format_fact("dislike", value)))
-        elif normalized.startswith("用户目标："):
-            value = normalized.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                struct_facts.append(MemoryFact(key="goal", value=value, text=_format_fact("goal", value)))
-        else:
-            # 尝试用正则提取
-            extracted = _extract_structured_facts_regex(normalized)
-            struct_facts.extend(extracted)
-
+    struct_facts = candidate_facts
     if not struct_facts:
         return []
 
@@ -397,34 +239,20 @@ def append_memory_facts(memory_file: Path, candidate_facts: list[str]) -> list[s
     existing_lines = existing_content.strip().split("\n") if existing_content.strip() else []
 
     # 从原始行中提取已存在的事实
+    # 直接按 key=value 格式解析（使用 | 分隔）
     existing_facts: dict[tuple[str, str], str] = {}  # (key, value) -> full_line
-    existing_facts_list: list[MemoryFact] = []
     for line in existing_lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        
-        # 尝试解析为 MemoryFact
-        if stripped.startswith("用户姓名："):
-            value = stripped.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                existing_facts[("name", value)] = stripped
-                existing_facts_list.append(MemoryFact(key="name", value=value, text=stripped))
-        elif stripped.startswith("用户喜欢："):
-            value = stripped.removeprefix("用户喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                existing_facts[("like", value)] = stripped
-                existing_facts_list.append(MemoryFact(key="like", value=value, text=stripped))
-        elif stripped.startswith("用户不喜欢："):
-            value = stripped.removeprefix("用户不喜欢：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                existing_facts[("dislike", value)] = stripped
-                existing_facts_list.append(MemoryFact(key="dislike", value=value, text=stripped))
-        elif stripped.startswith("用户目标："):
-            value = stripped.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
-            if value:
-                existing_facts[("goal", value)] = stripped
-                existing_facts_list.append(MemoryFact(key="goal", value=value, text=stripped))
+        # 格式: key|value
+        if "|" in stripped:
+            parts = stripped.split("|", 1)
+            if len(parts) == 2:
+                key = parts[0].strip()
+                value = parts[1].strip()
+                if key and value:
+                    existing_facts[(key, value)] = stripped
 
     # 提取本轮中要写入的 key 集群及其新值
     incoming_keys: set[str] = {fact.key for fact in struct_facts}
@@ -451,10 +279,12 @@ def append_memory_facts(memory_file: Path, candidate_facts: list[str]) -> list[s
             filtered_lines.append(line)
 
     newly_written: list[str] = []
+    new_lines: list[str] = []
     for fact in struct_facts:
         # 检查 (key, value) 对是否已存在
         if (fact.key, fact.value) not in existing_facts:
             newly_written.append(fact.text)
+            new_lines.append(f"{fact.key}|{fact.value}")
 
     if not newly_written and filtered_lines == existing_lines:
         # 无任何变化
@@ -464,8 +294,8 @@ def append_memory_facts(memory_file: Path, candidate_facts: list[str]) -> list[s
     new_content = "\n".join(filtered_lines)
     if filtered_lines and new_content:
         new_content += "\n"
-    if newly_written:
-        new_content += "\n".join(newly_written)
+    if new_lines:
+        new_content += "\n".join(new_lines)
 
     # 回写文件
     memory_file.write_text(new_content.strip() + "\n", encoding="utf8")

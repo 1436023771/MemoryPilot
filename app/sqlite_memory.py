@@ -105,29 +105,6 @@ def _rebuild_embeddings(conn: sqlite3.Connection) -> None:
         )
 
 
-def _parse_fact_text(fact_text: str) -> tuple[str, str, str] | None:
-    """将事实文本解析为 (key, value, text) 结构。"""
-    normalized = fact_text.strip()
-    if not normalized:
-        return None
-
-    prefix_mapping = {
-        "用户姓名：": "name",
-        "用户喜欢：": "like",
-        "用户不喜欢：": "dislike",
-        "用户目标：": "goal",
-    }
-
-    for prefix, key in prefix_mapping.items():
-        if normalized.startswith(prefix):
-            value = normalized.removeprefix(prefix).split("；", 1)[0].rstrip("。.!！?？").strip()
-            if not value:
-                return None
-            return key, value, normalized
-
-    return None
-
-
 def load_memory_chunks_from_sqlite(db_path: Path) -> list[MemoryChunk]:
     """从 SQLite 读取长期记忆，返回可检索片段列表。"""
     init_memory_db(db_path)
@@ -144,8 +121,11 @@ def load_memory_chunks_from_sqlite(db_path: Path) -> list[MemoryChunk]:
     return [MemoryChunk(text=row[0]) for row in rows]
 
 
-def write_facts_to_sqlite(db_path: Path, facts: list[str]) -> list[str]:
-    """将事实写入 SQLite，并在单值字段冲突时执行覆盖更新。"""
+def write_facts_to_sqlite(db_path: Path, facts: list) -> list[str]:
+    """将事实写入 SQLite，并在单值字段冲突时执行覆盖更新。
+    
+    接收 list[MemoryFact]（结构化对象），直接写入而不需要文本解析。
+    """
     if not facts:
         return []
 
@@ -155,11 +135,13 @@ def write_facts_to_sqlite(db_path: Path, facts: list[str]) -> list[str]:
 
     with _connect(db_path) as conn:
         for fact in facts:
-            parsed = _parse_fact_text(fact)
-            if parsed is None:
+            # 直接从 MemoryFact 对象提取
+            key = getattr(fact, "key", None)
+            value = getattr(fact, "value", None)
+            text = getattr(fact, "text", None)
+            
+            if not key or not value or not text:
                 continue
-
-            key, value, text = parsed
 
             if key in single_value_keys:
                 existing = conn.execute(
