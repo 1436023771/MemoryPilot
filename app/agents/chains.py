@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 from langchain.agents import create_agent
 from langchain_core.chat_history import BaseChatMessageHistory, InMemoryChatMessageHistory
@@ -13,8 +14,9 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI
 
-from app.config import Settings
-from app.prompts import DEFAULT_QA_PROMPT
+from app.core.config import Settings
+from app.core.prompts import DEFAULT_QA_PROMPT
+from app.agents.tools import web_search
 
 
 # 进程内会话仓库：key 是 session_id，value 是该会话的消息历史。
@@ -84,7 +86,14 @@ def _format_agent_user_input(question: str, retrieved_context: str) -> str:
     if not context:
         context = "(none)"
 
+    now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
     return (
+        "Current local time:\n"
+        f"{now_local}\n\n"
+        "You can use tool: web_search(query) for real-time and factual lookup.\n"
+        "If the question asks current events, schedules, statistics, or facts you are not fully sure about, call web_search first.\n"
+        "Do NOT say you cannot access information before trying web_search at least once (unless user explicitly forbids search).\n\n"
         "User question:\n"
         f"{question}\n\n"
         "Retrieved memory context (use only if relevant):\n"
@@ -199,13 +208,21 @@ def build_qa_chain(settings: Settings, cot_mode: str = "off"):
             | RunnableLambda(_build_brief_payload)
         )
     elif cot_mode == "agent":
-        # LangChain v1 内置 Agent（create_agent）模式。
+        # LangChain v1 内置 Agent（create_agent）模式，配备网络搜索能力。
+        now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         built_in_agent = create_agent(
             model=model,
-            tools=[],
+            tools=[web_search],
             system_prompt=(
-                "You are a concise assistant. Think step-by-step internally, "
-                "then provide a concise final answer."
+                "You are a helpful assistant with access to tools. "
+                f"Current local time is: {now_local}. "
+                "Interpret relative time phrases (e.g., 'this year', 'recently') based on current local time. "
+                "Available tool: web_search(query) for real-time information retrieval. "
+                "Tool usage policy: for current events, schedules, timelines, public-office activities, and any uncertain factual query, call web_search before answering. "
+                "Do not respond with 'I don't know' or 'my knowledge is limited' until you have attempted web_search at least once (unless user asks for no browsing). "
+                "When needed, run multiple searches with refined keywords and summarize the best-supported findings. "
+                "Then provide a concise final answer. "
+                "Always use retrieved memory when available and relevant."
             ),
         )
 

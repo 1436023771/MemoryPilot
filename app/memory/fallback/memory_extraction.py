@@ -6,7 +6,7 @@ from typing import Callable
 
 from langchain_openai import ChatOpenAI
 
-from app.config import get_settings
+from app.core.config import get_settings
 
 FactTuple = tuple[str, str, str]
 

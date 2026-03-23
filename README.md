@@ -8,18 +8,58 @@ A minimal project framework for building LangChain applications with clear struc
 .
 ├── .env.example
 ├── .gitignore
+├── docs
+│   ├── IMPLEMENTATION_DETAILS.md
+│   ├── TIME_AWARE_SEARCH_IMPROVEMENTS.md
+│   └── WEB_SEARCH_DISPLAY.md
 ├── README.md
 ├── requirements.txt
 ├── app
 │   ├── __init__.py
-│   ├── chains.py
-│   ├── config.py
-│   ├── main.py
-│   └── prompts.py
+│   ├── main.py                # compatibility wrapper -> app/cli/main.py
+│   ├── gui_chat.py            # compatibility wrapper -> app/ui/gui_chat.py
+│   ├── chains.py              # compatibility wrapper -> app/agents/chains.py
+│   ├── tools.py               # compatibility wrapper -> app/agents/tools.py
+│   ├── config.py              # compatibility wrapper -> app/core/config.py
+│   ├── prompts.py             # compatibility wrapper -> app/core/prompts.py
+│   ├── embeddings.py          # compatibility wrapper -> app/memory/embeddings.py
+│   ├── read_only_memory.py    # compatibility wrapper -> app/memory/read_only_memory.py
+│   ├── sqlite_memory.py       # compatibility wrapper -> app/memory/sqlite_memory.py
+│   ├── write_memory.py        # compatibility wrapper -> app/memory/write_memory.py
+│   ├── agents
+│   │   ├── __init__.py
+│   │   ├── chains.py
+│   │   └── tools.py
+│   ├── cli
+│   │   ├── __init__.py
+│   │   └── main.py
+│   ├── core
+│   │   ├── __init__.py
+│   │   ├── config.py
+│   │   └── prompts.py
+│   ├── memory
+│   │   ├── __init__.py
+│   │   ├── embeddings.py
+│   │   ├── read_only_memory.py
+│   │   ├── sqlite_memory.py
+│   │   ├── write_memory.py
+│   │   └── fallback
+│   │       ├── __init__.py
+│   │       └── memory_extraction.py
+│   └── ui
+│       ├── __init__.py
+│       └── gui_chat.py
 ├── memory
+│   ├── long_term_memory.db
 │   └── long_term_memory.txt
 └── tests
-    └── test_smoke.py
+    ├── test_config.py
+    ├── test_embeddings.py
+    ├── test_memory.py
+    ├── test_read_only_memory.py
+    ├── test_smoke.py
+    ├── test_sqlite_memory.py
+    └── test_write_memory.py
 ```
 
 ## Quick Start
@@ -57,33 +97,35 @@ TEMPERATURE=0.2
 4. Run the demo chain:
 
 ```bash
-python -m app.main "Explain retrieval-augmented generation in simple terms"
+python -m app.cli.main "Explain retrieval-augmented generation in simple terms"
 ```
+
 
 Run read-only RAG demo (retrieve from local long-term memory file):
 
 ```bash
-python -m app.main --use-rag --session-id demo-rag "请根据我的偏好给出建议"
+python -m app.cli.main --use-rag --session-id demo-rag "请根据我的偏好给出建议"
 ```
 
 Run writable long-term memory demo (SQLite backend):
 
 ```bash
-python -m app.main --memory-backend sqlite --use-rag --write-memory --show-memory-write "我叫小李，我喜欢简洁回答"
-python -m app.main --memory-backend sqlite --use-rag "我是谁？"
+python -m app.cli.main --memory-backend sqlite --use-rag --write-memory --show-memory-write "我叫小李，我喜欢简洁回答"
+python -m app.cli.main --memory-backend sqlite --use-rag "我是谁？"
 ```
 
 Start multi-turn interactive chat:
 
 ```bash
-python -m app.main --interactive --session-id demo-chat
+python -m app.cli.main --interactive --session-id demo-chat
 ```
 
 Start desktop chat window (GUI, defaults to short-term + long-term memory):
 
 ```bash
-python -m app.gui_chat
+python -m app.ui.gui_chat
 ```
+
 
 5. Run tests:
 
@@ -138,7 +180,7 @@ pytest
 Conflict update example:
 
 ```bash
-python -m app.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag --write-memory --show-memory-write "我叫小李"
-python -m app.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag --write-memory --show-memory-write "我叫李华"
-python -m app.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag "我叫什么？"
+python -m app.cli.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag --write-memory --show-memory-write "我叫小李"
+python -m app.cli.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag --write-memory --show-memory-write "我叫李华"
+python -m app.cli.main --memory-backend sqlite --memory-db memory/long_term_memory_demo.db --use-rag "我叫什么？"
 ```

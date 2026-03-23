@@ -8,8 +8,8 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from app.config import get_settings
-from app.fallback import extract_candidate_facts_single_turn, extract_structured_facts_regex
+from app.core.config import get_settings
+from app.memory.fallback import extract_candidate_facts_single_turn, extract_structured_facts_regex
 
 
 @dataclass(frozen=True)
@@ -265,12 +265,22 @@ def append_memory_facts(memory_file: Path, candidate_facts: list[MemoryFact]) ->
         stripped = line.strip()
         
         if stripped and not stripped.startswith("#"):
+            # 新格式: key|value
+            if "|" in stripped:
+                parts = stripped.split("|", 1)
+                if len(parts) == 2:
+                    old_key = parts[0].strip()
+                    old_value = parts[1].strip()
+                    if old_key in _SINGLE_VALUE_KEYS and old_key in incoming_keys:
+                        if incoming_key_values.get(old_key) != old_value:
+                            should_keep = False
+
             # 检查这一行是否需要被替换（值发生变化）
-            if stripped.startswith("用户姓名："):
+            if should_keep and stripped.startswith("用户姓名："):
                 old_value = stripped.removeprefix("用户姓名：").split("；", 1)[0].rstrip("。.!！?？").strip()
                 if "name" in incoming_keys and incoming_key_values.get("name") != old_value:
                     should_keep = False
-            elif stripped.startswith("用户目标："):
+            elif should_keep and stripped.startswith("用户目标："):
                 old_value = stripped.removeprefix("用户目标：").split("；", 1)[0].rstrip("。.!！?？").strip()
                 if "goal" in incoming_keys and incoming_key_values.get("goal") != old_value:
                     should_keep = False

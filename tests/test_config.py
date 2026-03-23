@@ -1,6 +1,6 @@
 import pytest
 
-from app.config import get_settings
+from app.core.config import get_settings
 
 
 def test_deepseek_settings(monkeypatch: pytest.MonkeyPatch) -> None:

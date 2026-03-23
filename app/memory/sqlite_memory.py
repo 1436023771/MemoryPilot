@@ -5,8 +5,8 @@ from pathlib import Path
 import pickle
 import re
 
-from app.embeddings import EmbeddingManager
-from app.read_only_memory import MemoryChunk
+from app.memory.embeddings import EmbeddingManager
+from app.memory.read_only_memory import MemoryChunk
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -222,6 +222,27 @@ def retrieve_memory_context_hybrid_from_sqlite(
         meta = conn.execute(
             "SELECT vectorizer_blob FROM memory_embedding_meta WHERE id = 1"
         ).fetchone()
+
+        # 兼容历史数据库：旧版本 pickle 中可能引用 app.embeddings。
+        # 若反序列化失败，则自动按当前代码重建向量并重试加载。
+        if meta and meta[0]:
+            manager = EmbeddingManager(max_df=1.0)
+            try:
+                manager.loads(meta[0])
+            except ModuleNotFoundError:
+                _rebuild_embeddings(conn)
+                conn.commit()
+                meta = conn.execute(
+                    "SELECT vectorizer_blob FROM memory_embedding_meta WHERE id = 1"
+                ).fetchone()
+                rows = conn.execute(
+                    """
+                    SELECT f.id, f.fact_text, e.embedding_blob
+                    FROM memory_facts f
+                    LEFT JOIN memory_embeddings e ON e.fact_id = f.id
+                    ORDER BY f.updated_at DESC, f.id DESC
+                    """
+                ).fetchall()
 
     if not rows:
         return ""

@@ -1,4 +1,4 @@
-from app.prompts import DEFAULT_QA_PROMPT
+from app.core.prompts import DEFAULT_QA_PROMPT
 
 
 def test_prompt_variables() -> None:

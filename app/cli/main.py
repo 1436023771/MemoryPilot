@@ -2,16 +2,16 @@ import argparse
 import json
 from pathlib import Path
 
-from app.chains import build_qa_chain
-from app.chains import get_session_history
-from app.config import get_settings
-from app.read_only_memory import load_memory_chunks, retrieve_memory_context
-from app.sqlite_memory import (
+from app.agents.chains import build_qa_chain
+from app.agents.chains import get_session_history
+from app.core.config import get_settings
+from app.memory.read_only_memory import load_memory_chunks, retrieve_memory_context
+from app.memory.sqlite_memory import (
     load_memory_chunks_from_sqlite,
     retrieve_memory_context_hybrid_from_sqlite,
     write_facts_to_sqlite,
 )
-from app.write_memory import (
+from app.memory.write_memory import (
     append_memory_facts,
     extract_candidate_facts,
     extract_candidate_facts_from_dialogue,

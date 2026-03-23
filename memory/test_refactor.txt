@@ -1,3 +1,0 @@
-name|小王
-like|编程
-preference|简洁回答

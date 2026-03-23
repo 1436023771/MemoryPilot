@@ -5,7 +5,7 @@
 from pathlib import Path
 
 import pytest
-from app.embeddings import EmbeddingManager, create_and_fit_embedding_manager
+from app.memory.embeddings import EmbeddingManager, create_and_fit_embedding_manager
 
 
 class TestEmbeddingManager:

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.read_only_memory import MemoryChunk, load_memory_chunks, retrieve_memory_context
+from app.memory.read_only_memory import MemoryChunk, load_memory_chunks, retrieve_memory_context
 
 
 def test_load_memory_chunks_from_file(tmp_path: Path) -> None:

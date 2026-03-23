@@ -1,4 +1,4 @@
-from app.chains import get_session_history
+from app.agents.chains import get_session_history
 
 
 def test_session_history_is_isolated() -> None:
