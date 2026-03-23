@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import threading
 import tkinter as tk
@@ -29,6 +30,7 @@ class ChatWindow:
         self.write_memory = True
         self.top_k = 3
         self.turn_count = 0  # 用于追踪轮次编号
+        self.cot_mode = "off"  # CoT 模式切换：off | brief
 
         # 默认使用 SQLite 后端，保留 txt 兼容路径。
         self.memory_backend = "sqlite"
@@ -37,7 +39,7 @@ class ChatWindow:
         self.memory_chunks = load_memory_chunks(self.memory_file)
 
         settings = get_settings()
-        self.chain = build_qa_chain(settings)
+        self.chain = build_qa_chain(settings, cot_mode=self.cot_mode)
 
         self.root = tk.Tk()
         self.root.title("Agent Chat Demo")
@@ -49,12 +51,27 @@ class ChatWindow:
         container = ttk.Frame(self.root, padding=12)
         container.pack(fill=tk.BOTH, expand=True)
 
+        status_frame = ttk.Frame(container)
+        status_frame.pack(fill=tk.X, pady=(0, 8))
+
         status_text = (
             f"session_id={self.session_id} | backend={self.memory_backend} "
             f"| rag=on | write_memory=on"
         )
-        status = ttk.Label(container, text=status_text)
-        status.pack(anchor=tk.W, pady=(0, 8))
+        status = ttk.Label(status_frame, text=status_text)
+        status.pack(side=tk.LEFT, anchor=tk.W)
+
+        ttk.Label(status_frame, text="CoT Mode:").pack(side=tk.RIGHT, padx=(0, 4))
+        self.cot_var = tk.StringVar(value="off")
+        cot_combo = ttk.Combobox(
+            status_frame,
+            textvariable=self.cot_var,
+            values=["off", "brief", "agent"],
+            state="readonly",
+            width=8,
+        )
+        cot_combo.pack(side=tk.RIGHT)
+        cot_combo.bind("<<ComboboxSelected>>", self._on_cot_mode_changed)
 
         # 主布局：左侧对话窗口，右侧侧边栏
         main_paned = ttk.PanedWindow(container, orient=tk.HORIZONTAL)
@@ -126,6 +143,44 @@ class ChatWindow:
         self.chat_box.configure(state=tk.DISABLED)
         self.chat_box.see(tk.END)
 
+    def _on_cot_mode_changed(self, _event=None) -> None:
+        """切换 CoT 模式时重建链"""
+        new_mode = self.cot_var.get()
+        if new_mode != self.cot_mode:
+            self.cot_mode = new_mode
+            settings = get_settings()
+            self.chain = build_qa_chain(settings, cot_mode=self.cot_mode)
+            self._append_message("assistant", f"已切换到 CoT 模式: {self.cot_mode}")
+
+    def _parse_cot_response(self, response_text: str) -> tuple[str, list[str]]:
+        """解析 CoT JSON 响应，返回 (answer, brief_steps)"""
+        if self.cot_mode == "off":
+            return response_text, []
+
+        text = response_text.strip()
+        if text.startswith("```json") or text.startswith("```"):
+            parts = text.split("```")
+            if len(parts) >= 2:
+                text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                answer = str(payload.get("answer", response_text)).strip()
+                steps = payload.get("brief_steps", [])
+                if isinstance(steps, list):
+                    steps = [str(s).strip() for s in steps if str(s).strip()]
+                return answer, steps
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        return response_text, []
+
     def _append_to_sidebar(
         self,
         turn_num: int,
@@ -133,8 +188,11 @@ class ChatWindow:
         context: str,
         extracted_facts: list[str],
         written_facts: list[str],
+        cot_steps: list[str] | None = None,
     ) -> None:
-        """在侧边栏中记录完整的prompt信息"""
+        """在侧边栏中记录完整的prompt信息和CoT思路"""
+        if cot_steps is None:
+            cot_steps = []
         self.sidebar_box.configure(state=tk.NORMAL)
         
         # 轮次标题
@@ -168,6 +226,13 @@ class ChatWindow:
             self.sidebar_box.insert(tk.END, "\n", "context")
         else:
             self.sidebar_box.insert(tk.END, "[No new facts written]\n\n", "context")
+
+        # CoT 思路（如果启用）
+        if cot_steps:
+            self.sidebar_box.insert(tk.END, "CoT Reasoning:\n", "context_header")
+            for step in cot_steps:
+                self.sidebar_box.insert(tk.END, f"• {step}\n", "context")
+            self.sidebar_box.insert(tk.END, "\n", "context")
         
         self.sidebar_box.configure(state=tk.DISABLED)
         self.sidebar_box.see(tk.END)
@@ -222,19 +287,22 @@ class ChatWindow:
                 {"question": user_input, "retrieved_context": retrieved_context},
                 config={"configurable": {"session_id": self.session_id}},
             )
+            # 解析 CoT 响应
+            answer, cot_steps = self._parse_cot_response(str(response))
             extracted_facts, written_facts = self._write_long_term_memory(user_input)
             self.root.after(
                 0,
                 self._on_turn_finished,
-                str(response),
+                answer,
                 extracted_facts,
                 written_facts,
                 None,
                 user_input,
                 retrieved_context,
+                cot_steps,
             )
         except Exception as exc:  # noqa: BLE001
-            self.root.after(0, self._on_turn_finished, "", [], [], str(exc), user_input, "")
+            self.root.after(0, self._on_turn_finished, "", [], [], str(exc), user_input, "", [])
 
     def _on_turn_finished(
         self,
@@ -244,7 +312,10 @@ class ChatWindow:
         error: str | None,
         user_input: str = "",
         retrieved_context: str = "",
+        cot_steps: list[str] | None = None,
     ) -> None:
+        if cot_steps is None:
+            cot_steps = []
         # 记录到侧边栏
         self._append_to_sidebar(
             self.turn_count,
@@ -252,6 +323,7 @@ class ChatWindow:
             retrieved_context,
             extracted_facts,
             written_facts,
+            cot_steps=cot_steps,
         )
         
         if error:
