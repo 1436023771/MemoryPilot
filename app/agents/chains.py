@@ -10,7 +10,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI
 
 from app.core.config import Settings
-from app.agents.tools import run_python_code, web_search
+from app.agents.tools import retrieve_pg_knowledge, run_python_code, web_search
 
 
 # 进程内会话仓库：key 是 session_id，value 是该会话的消息历史。
@@ -29,8 +29,10 @@ def _format_agent_user_input(question: str, retrieved_context: str) -> str:
         "Current local time:\n"
         f"{now_local}\n\n"
         "You can use tool: web_search(query) for real-time and factual lookup.\n"
+        "You can use tool: retrieve_pg_knowledge(query, top_k) for internal document knowledge retrieval.\n"
         "You can use tool: run_python_code(code) for precise calculation and logic verification.\n"
         "If the question asks current events, schedules, statistics, or facts you are not fully sure about, call web_search first.\n"
+        "If the question is about project docs/domain knowledge, call retrieve_pg_knowledge first.\n"
         "If the question requires exact arithmetic, simulation, or multi-step logic validation, call run_python_code.\n"
         "Do NOT say you cannot access information before trying web_search at least once (unless user explicitly forbids search).\n\n"
         "User question:\n"
@@ -103,14 +105,16 @@ def build_qa_chain(settings: Settings):
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     built_in_agent = create_agent(
         model=model,
-        tools=[web_search, run_python_code],
+        tools=[web_search, retrieve_pg_knowledge, run_python_code],
         system_prompt=(
             "You are a helpful assistant with access to tools. "
             f"Current local time is: {now_local}. "
             "Interpret relative time phrases (e.g., 'this year', 'recently') based on current local time. "
             "Available tool: web_search(query) for real-time information retrieval. "
+            "Available tool: retrieve_pg_knowledge(query, top_k) for internal knowledge base retrieval from PostgreSQL+pgvector. "
             "Available tool: run_python_code(code) for exact calculations and logic checks. "
             "Tool usage policy: for current events, schedules, timelines, public-office activities, and any uncertain factual query, call web_search before answering. "
+            "Tool usage policy: for questions about project documents, design details, or stored knowledge, call retrieve_pg_knowledge before answering. "
             "Tool usage policy: for math, algorithmic reasoning, or any answer requiring precise computation, call run_python_code before finalizing. "
             "Do not respond with 'I don't know' or 'my knowledge is limited' until you have attempted web_search at least once (unless user asks for no browsing). "
             "When needed, run multiple searches with refined keywords and summarize the best-supported findings. "

@@ -116,12 +116,31 @@ Start desktop chat window (GUI, defaults to short-term + long-term memory):
 python -m app.ui.gui_chat
 ```
 
+Ingest docs into PostgreSQL + pgvector knowledge base:
+
+```bash
+export PGVECTOR_DSN="postgresql://user:password@localhost:5432/agent_db"
+python -m app.cli.ingest_pg_knowledge --input-path docs --table knowledge_chunks --reset
+```
+
+Query PostgreSQL + pgvector knowledge base:
+
+```bash
+python -m app.cli.query_pg_knowledge "这个项目的记忆机制是什么？" --table knowledge_chunks --top-k 5
+```
+
 
 5. Run tests:
 
 ```bash
 pytest
 ```
+
+## PostgreSQL + pgvector Knowledge Base
+
+- Ingestion CLI: `python -m app.cli.ingest_pg_knowledge`
+- Query CLI: `python -m app.cli.query_pg_knowledge`
+- Detailed setup: `docs/POSTGRES_PGVECTOR_KNOWLEDGE_SETUP.md`
 
 ## Next Extensions
 

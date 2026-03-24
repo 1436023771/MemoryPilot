@@ -14,8 +14,10 @@ from app.memory.sqlite_memory import (
     write_facts_to_sqlite,
 )
 from app.agents.tools import (
+    clear_knowledge_retrieval_log,
     clear_python_exec_log,
     clear_search_log,
+    get_knowledge_retrieval_log,
     get_python_exec_log,
     get_search_log,
 )
@@ -35,6 +37,9 @@ class ChatWindow:
         self.write_memory = True
         self.top_k = 3
         self.turn_count = 0  # 用于追踪轮次编号
+        self.chat_font = ("Menlo", 10)
+        self.sidebar_font = ("Menlo", 8)
+        self.header_font = ("Menlo", 8, "bold")
 
         # 默认使用 SQLite 后端，保留 txt 兼容路径。
         self.memory_backend = "sqlite"
@@ -47,7 +52,9 @@ class ChatWindow:
 
         self.root = tk.Tk()
         self.root.title("Agent Chat Demo")
-        self.root.geometry("1400x620")
+        self.root.geometry("1240x680")
+        self.root.minsize(980, 520)
+        self.root.configure(bg="#eef2f6")
 
         self._build_layout()
 
@@ -77,13 +84,22 @@ class ChatWindow:
             left_frame,
             wrap=tk.WORD,
             state=tk.DISABLED,
-            font=("Menlo", 11),
+            font=self.chat_font,
+            bg="#fbfdff",
+            fg="#1f2328",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=10,
+            pady=10,
+            spacing1=2,
+            spacing3=4,
+            insertbackground="#1f2328",
         )
-        self.chat_box.pack(fill=tk.BOTH, expand=True)
+        self.chat_box.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        self.chat_box.tag_configure("you", foreground="#1f6feb")
-        self.chat_box.tag_configure("assistant", foreground="#0f5132")
-        self.chat_box.tag_configure("memory", foreground="#6a737d")
+        self.chat_box.tag_configure("you", foreground="#0a63cc")
+        self.chat_box.tag_configure("assistant", foreground="#0e5a2f")
+        self.chat_box.tag_configure("memory", foreground="#57606a")
         self.chat_box.tag_configure("error", foreground="#b42318")
 
         # 右侧：侧边栏（Prompt 历史）
@@ -94,26 +110,37 @@ class ChatWindow:
             sidebar_frame,
             wrap=tk.WORD,
             state=tk.DISABLED,
-            font=("Menlo", 9),
+            font=self.sidebar_font,
             bg="#f6f8fa",
+            fg="#24292f",
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=8,
+            pady=8,
+            spacing1=1,
+            spacing3=3,
         )
         self.sidebar_box.pack(fill=tk.BOTH, expand=True)
 
-        self.sidebar_box.tag_configure("turn_header", foreground="#0969da", font=("Menlo", 9, "bold"))
+        self.sidebar_box.tag_configure("turn_header", foreground="#0969da", font=("Menlo", 8, "bold"))
         self.sidebar_box.tag_configure("user_query", foreground="#1f6feb")
-        self.sidebar_box.tag_configure("context_header", foreground="#6f42c1", font=("Menlo", 8, "bold"))
+        self.sidebar_box.tag_configure("context_header", foreground="#6f42c1", font=self.header_font)
         self.sidebar_box.tag_configure("context", foreground="#5a6268")
 
         # 输入区域
         input_row = ttk.Frame(container)
         input_row.pack(fill=tk.X, pady=(0, 0))
 
+        style = ttk.Style(self.root)
+        style.configure("Chat.TEntry", font=("Menlo", 10))
+        style.configure("Chat.TButton", font=("Menlo", 9))
+
         self.input_var = tk.StringVar()
-        self.input_entry = ttk.Entry(input_row, textvariable=self.input_var)
+        self.input_entry = ttk.Entry(input_row, textvariable=self.input_var, style="Chat.TEntry")
         self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.input_entry.bind("<Return>", self._on_send)
 
-        self.send_btn = ttk.Button(input_row, text="发送", command=self._on_send)
+        self.send_btn = ttk.Button(input_row, text="发送", command=self._on_send, style="Chat.TButton")
         self.send_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self._append_message(
@@ -143,11 +170,14 @@ class ChatWindow:
         extracted_facts: list[str],
         written_facts: list[str],
         searches: list[dict] | None = None,
+        knowledge_hits: list[dict] | None = None,
         python_execs: list[dict] | None = None,
     ) -> None:
         """在侧边栏中记录完整的 prompt 信息和搜索结果。"""
         if searches is None:
             searches = []
+        if knowledge_hits is None:
+            knowledge_hits = []
         if python_execs is None:
             python_execs = []
             
@@ -194,6 +224,15 @@ class ChatWindow:
                 self.sidebar_box.insert(tk.END, f"Query: {query}\n", "user_query")
                 # 限制搜索结果显示长度
                 result_preview = results[:300] + "..." if len(results) > 300 else results
+                self.sidebar_box.insert(tk.END, f"{result_preview}\n\n", "context")
+
+        if knowledge_hits:
+            self.sidebar_box.insert(tk.END, "Knowledge Retrieval:\n", "context_header")
+            for item in knowledge_hits:
+                query = str(item.get("query", "")).strip()
+                result = str(item.get("result", "")).strip()
+                result_preview = result[:300] + "..." if len(result) > 300 else result
+                self.sidebar_box.insert(tk.END, f"Query: {query}\n", "user_query")
                 self.sidebar_box.insert(tk.END, f"{result_preview}\n\n", "context")
 
         if python_execs:
@@ -257,6 +296,7 @@ class ChatWindow:
             self.turn_count += 1
             # 清除上一轮的搜索记录
             clear_search_log()
+            clear_knowledge_retrieval_log()
             clear_python_exec_log()
             
             retrieved_context = self._build_retrieved_context(user_input)
@@ -266,6 +306,7 @@ class ChatWindow:
             )
             # 获取本轮搜索信息
             searches = get_search_log()
+            knowledge_hits = get_knowledge_retrieval_log()
             python_execs = get_python_exec_log()
             
             extracted_facts, written_facts = self._write_long_term_memory(user_input)
@@ -279,10 +320,11 @@ class ChatWindow:
                 user_input,
                 retrieved_context,
                 searches,
+                knowledge_hits,
                 python_execs,
             )
         except Exception as exc:  # noqa: BLE001
-            self.root.after(0, self._on_turn_finished, "", [], [], str(exc), user_input, "", [], [])
+            self.root.after(0, self._on_turn_finished, "", [], [], str(exc), user_input, "", [], [], [])
 
     def _on_turn_finished(
         self,
@@ -293,10 +335,13 @@ class ChatWindow:
         user_input: str = "",
         retrieved_context: str = "",
         searches: list[dict] | None = None,
+        knowledge_hits: list[dict] | None = None,
         python_execs: list[dict] | None = None,
     ) -> None:
         if searches is None:
             searches = []
+        if knowledge_hits is None:
+            knowledge_hits = []
         if python_execs is None:
             python_execs = []
             
@@ -308,6 +353,7 @@ class ChatWindow:
             extracted_facts,
             written_facts,
             searches=searches,
+            knowledge_hits=knowledge_hits,
             python_execs=python_execs,
         )
         
