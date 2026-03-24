@@ -1,5 +1,4 @@
 import argparse
-import json
 from pathlib import Path
 
 from app.agents.chains import build_qa_chain
@@ -16,46 +15,6 @@ from app.memory.write_memory import (
     extract_candidate_facts,
     extract_candidate_facts_from_dialogue,
 )
-
-
-def _format_cot_response(raw_text: str, cot_mode: str) -> str:
-    """处理 CoT 响应，将 JSON 转换为可读格式（brief 模式）。"""
-    if cot_mode == "off":
-        return raw_text
-    
-    text = raw_text.strip()
-    
-    # 移除 markdown 代码块标记（```json ... ```）
-    if text.startswith("```json") or text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    if text.endswith("```"):
-        text = text[:-3].strip()
-    
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return raw_text
-
-    if not isinstance(payload, dict):
-        return raw_text
-
-    answer = str(payload.get("answer", "")).strip()
-    steps = payload.get("brief_steps", [])
-    if not isinstance(steps, list):
-        steps = []
-
-    step_lines = [str(item).strip() for item in steps if str(item).strip()][:5]
-    if not step_lines:
-        return answer or raw_text
-
-    if not answer:
-        answer = "(未生成明确答案)"
-
-    bullets = "\n".join(f"- {line}" for line in step_lines)
-    return f"{answer}\n\n思路摘要:\n{bullets}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,12 +63,6 @@ def parse_args() -> argparse.Namespace:
         "--show-memory-write",
         action="store_true",
         help="Print facts written to long-term memory in current turn",
-    )
-    parser.add_argument(
-        "--cot-mode",
-        choices=["off", "brief", "agent"],
-        default="off",
-        help="Reasoning output mode: off=normal, brief=two-stage steps+answer, agent=LangChain built-in agent",
     )
     return parser.parse_args()
 
@@ -180,11 +133,10 @@ def run_single_turn(
     memory_db: Path,
     memory_backend: str,
     show_memory_write: bool,
-    cot_mode: str,
 ) -> None:
     # 单轮模式：构建链后仅调用一次。
     settings = get_settings()
-    chain = build_qa_chain(settings, cot_mode=cot_mode)
+    chain = build_qa_chain(settings)
 
     retrieved_context = _build_retrieved_context(
         question=question,
@@ -200,8 +152,7 @@ def run_single_turn(
         {"question": question, "retrieved_context": retrieved_context},
         config={"configurable": {"session_id": session_id}},
     )
-    formatted_response = _format_cot_response(str(response), cot_mode)
-    print(formatted_response)
+    print(str(response))
 
     _maybe_write_long_term_memory(
         question=question,
@@ -224,11 +175,10 @@ def run_interactive(
     memory_db: Path,
     memory_backend: str,
     show_memory_write: bool,
-    cot_mode: str,
 ) -> None:
     # 交互模式：同一进程内循环对话，可连续复用短期记忆。
     settings = get_settings()
-    chain = build_qa_chain(settings, cot_mode=cot_mode)
+    chain = build_qa_chain(settings)
     print(f"Interactive chat started (session_id={session_id}). Type 'exit' to quit.")
 
     while True:
@@ -254,8 +204,7 @@ def run_interactive(
             {"question": user_input, "retrieved_context": retrieved_context},
             config={"configurable": {"session_id": session_id}},
         )
-        formatted_response = _format_cot_response(str(response), cot_mode)
-        print(f"Assistant: {formatted_response}")
+        print(f"Assistant: {str(response)}")
 
         _maybe_write_long_term_memory(
             question=user_input,
@@ -290,7 +239,6 @@ def main() -> None:
             memory_db=memory_db,
             memory_backend=args.memory_backend,
             show_memory_write=args.show_memory_write,
-            cot_mode=args.cot_mode,
         )
         return
 
@@ -306,7 +254,6 @@ def main() -> None:
         memory_db=memory_db,
         memory_backend=args.memory_backend,
         show_memory_write=args.show_memory_write,
-        cot_mode=args.cot_mode,
     )
 
 

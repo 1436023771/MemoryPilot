@@ -16,16 +16,6 @@ A minimal project framework for building LangChain applications with clear struc
 ├── requirements.txt
 ├── app
 │   ├── __init__.py
-│   ├── main.py                # compatibility wrapper -> app/cli/main.py
-│   ├── gui_chat.py            # compatibility wrapper -> app/ui/gui_chat.py
-│   ├── chains.py              # compatibility wrapper -> app/agents/chains.py
-│   ├── tools.py               # compatibility wrapper -> app/agents/tools.py
-│   ├── config.py              # compatibility wrapper -> app/core/config.py
-│   ├── prompts.py             # compatibility wrapper -> app/core/prompts.py
-│   ├── embeddings.py          # compatibility wrapper -> app/memory/embeddings.py
-│   ├── read_only_memory.py    # compatibility wrapper -> app/memory/read_only_memory.py
-│   ├── sqlite_memory.py       # compatibility wrapper -> app/memory/sqlite_memory.py
-│   ├── write_memory.py        # compatibility wrapper -> app/memory/write_memory.py
 │   ├── agents
 │   │   ├── __init__.py
 │   │   ├── chains.py

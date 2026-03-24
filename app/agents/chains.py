@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 
 from langchain.agents import create_agent
@@ -6,78 +5,16 @@ from langchain_core.chat_history import BaseChatMessageHistory, InMemoryChatMess
 from langchain_core.messages import AIMessage
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage
-from langchain_core.messages import SystemMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_openai import ChatOpenAI
 
 from app.core.config import Settings
-from app.core.prompts import DEFAULT_QA_PROMPT
-from app.agents.tools import web_search
+from app.agents.tools import run_python_code, web_search
 
 
 # 进程内会话仓库：key 是 session_id，value 是该会话的消息历史。
 _SESSION_STORE: dict[str, InMemoryChatMessageHistory] = {}
-
-
-def _strip_markdown_code_fence(raw_text: str) -> str:
-    """移除可能的 ```json 代码块外壳。"""
-    text = raw_text.strip()
-
-    if text.startswith("```json") or text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    if text.endswith("```"):
-        text = text[:-3].strip()
-
-    return text
-
-
-def _parse_brief_steps(raw_text: str) -> list[str]:
-    """从模型输出中解析 brief_steps 列表，失败时给空列表。"""
-    text = _strip_markdown_code_fence(raw_text)
-
-    try:
-        payload = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-    if not isinstance(payload, dict):
-        return []
-
-    steps = payload.get("brief_steps", [])
-    if not isinstance(steps, list):
-        return []
-
-    return [str(item).strip() for item in steps if str(item).strip()][:5]
-
-
-def _steps_to_text(steps: list[str]) -> str:
-    """将步骤列表转成给第二阶段模型可读的编号文本。"""
-    if not steps:
-        return ""
-    return "\n".join(f"{idx + 1}. {item}" for idx, item in enumerate(steps))
-
-
-def _build_brief_payload(data: dict) -> str:
-    """将二阶段 CoT 结果组装成稳定 JSON 文本。"""
-    answer = str(data.get("answer", "")).strip()
-    steps = data.get("cot_steps", [])
-    if not isinstance(steps, list):
-        steps = []
-
-    payload = {
-        "answer": answer,
-        "brief_steps": [str(item).strip() for item in steps if str(item).strip()][:5],
-    }
-    return json.dumps(payload, ensure_ascii=False)
 
 
 def _format_agent_user_input(question: str, retrieved_context: str) -> str:
@@ -92,7 +29,9 @@ def _format_agent_user_input(question: str, retrieved_context: str) -> str:
         "Current local time:\n"
         f"{now_local}\n\n"
         "You can use tool: web_search(query) for real-time and factual lookup.\n"
+        "You can use tool: run_python_code(code) for precise calculation and logic verification.\n"
         "If the question asks current events, schedules, statistics, or facts you are not fully sure about, call web_search first.\n"
+        "If the question requires exact arithmetic, simulation, or multi-step logic validation, call run_python_code.\n"
         "Do NOT say you cannot access information before trying web_search at least once (unless user explicitly forbids search).\n\n"
         "User question:\n"
         f"{question}\n\n"
@@ -150,8 +89,8 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     return _SESSION_STORE[session_id]
 
 
-def build_qa_chain(settings: Settings, cot_mode: str = "off"):
-    """构建带短期记忆的问答链：Prompt -> 模型 -> 输出解析。"""
+def build_qa_chain(settings: Settings):
+    """构建仅包含 Agent 模式的问答链。"""
     # 初始化聊天模型，兼容 OpenAI 与 DeepSeek（OpenAI 兼容接口）。
     model = ChatOpenAI(
         model=settings.model_name,
@@ -160,80 +99,31 @@ def build_qa_chain(settings: Settings, cot_mode: str = "off"):
         base_url=settings.base_url,
     )
 
-    if cot_mode == "brief":
-        # 第一阶段：仅生成思路步骤，不直接给最终答案。
-        reasoning_prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a reasoning planner.\n"
-                    "Use retrieved memory only when relevant.\n"
-                    "Retrieved memory:\n{retrieved_context}\n\n"
-                    "Return ONLY valid JSON in this shape:\n"
-                    "{{\"brief_steps\":[\"...\"]}}\n"
-                    "Rules:\n"
-                    "1) brief_steps must contain 2-5 short actionable steps.\n"
-                    "2) Do not include final answer content in steps.\n"
-                    "3) Do not output markdown code fences or extra keys.",
-                ),
-                MessagesPlaceholder(variable_name="history"),
-                ("human", "{question}"),
-            ]
-        )
+    # LangChain v1 内置 Agent（create_agent）模式，配备网络搜索能力。
+    now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    built_in_agent = create_agent(
+        model=model,
+        tools=[web_search, run_python_code],
+        system_prompt=(
+            "You are a helpful assistant with access to tools. "
+            f"Current local time is: {now_local}. "
+            "Interpret relative time phrases (e.g., 'this year', 'recently') based on current local time. "
+            "Available tool: web_search(query) for real-time information retrieval. "
+            "Available tool: run_python_code(code) for exact calculations and logic checks. "
+            "Tool usage policy: for current events, schedules, timelines, public-office activities, and any uncertain factual query, call web_search before answering. "
+            "Tool usage policy: for math, algorithmic reasoning, or any answer requiring precise computation, call run_python_code before finalizing. "
+            "Do not respond with 'I don't know' or 'my knowledge is limited' until you have attempted web_search at least once (unless user asks for no browsing). "
+            "When needed, run multiple searches with refined keywords and summarize the best-supported findings. "
+            "Then provide a concise final answer. "
+            "Always use retrieved memory when available and relevant."
+        ),
+    )
 
-        # 第二阶段：严格依据第一阶段步骤生成最终答案。
-        answer_prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "You are a concise assistant.\n"
-                    "Use the provided reasoning steps to produce the final answer.\n"
-                    "Do not ignore the steps.\n"
-                    "Retrieved memory:\n{retrieved_context}\n\n"
-                    "Reasoning steps:\n{cot_steps_text}\n\n"
-                    "Return only the final answer in plain text.",
-                ),
-                MessagesPlaceholder(variable_name="history"),
-                ("human", "{question}"),
-            ]
-        )
-
-        steps_chain = reasoning_prompt | model | StrOutputParser() | RunnableLambda(_parse_brief_steps)
-
-        # brief 模式：先产出 steps，再基于 steps 生成 answer，最后打包为 JSON。
-        base_chain = (
-            RunnablePassthrough.assign(cot_steps=steps_chain)
-            .assign(cot_steps_text=RunnableLambda(lambda x: _steps_to_text(x.get("cot_steps", []))))
-            .assign(answer=answer_prompt | model | StrOutputParser())
-            | RunnableLambda(_build_brief_payload)
-        )
-    elif cot_mode == "agent":
-        # LangChain v1 内置 Agent（create_agent）模式，配备网络搜索能力。
-        now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-        built_in_agent = create_agent(
-            model=model,
-            tools=[web_search],
-            system_prompt=(
-                "You are a helpful assistant with access to tools. "
-                f"Current local time is: {now_local}. "
-                "Interpret relative time phrases (e.g., 'this year', 'recently') based on current local time. "
-                "Available tool: web_search(query) for real-time information retrieval. "
-                "Tool usage policy: for current events, schedules, timelines, public-office activities, and any uncertain factual query, call web_search before answering. "
-                "Do not respond with 'I don't know' or 'my knowledge is limited' until you have attempted web_search at least once (unless user asks for no browsing). "
-                "When needed, run multiple searches with refined keywords and summarize the best-supported findings. "
-                "Then provide a concise final answer. "
-                "Always use retrieved memory when available and relevant."
-            ),
-        )
-
-        base_chain = (
-            RunnableLambda(lambda x: {"messages": _to_agent_messages(x)})
-            | built_in_agent
-            | RunnableLambda(_extract_agent_answer)
-        )
-    else:
-        # 默认模式：保持原有行为不变。
-        base_chain = DEFAULT_QA_PROMPT | model | StrOutputParser()
+    base_chain = (
+        RunnableLambda(lambda x: {"messages": _to_agent_messages(x)})
+        | built_in_agent
+        | RunnableLambda(_extract_agent_answer)
+    )
 
     # 用 RunnableWithMessageHistory 包装后，链会自动读写会话历史。
     return RunnableWithMessageHistory(

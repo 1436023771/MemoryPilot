@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import threading
 import tkinter as tk
@@ -14,7 +13,12 @@ from app.memory.sqlite_memory import (
     retrieve_memory_context_hybrid_from_sqlite,
     write_facts_to_sqlite,
 )
-from app.agents.tools import clear_search_log, get_search_log
+from app.agents.tools import (
+    clear_python_exec_log,
+    clear_search_log,
+    get_python_exec_log,
+    get_search_log,
+)
 from app.memory.write_memory import (
     append_memory_facts,
     extract_candidate_facts,
@@ -31,7 +35,6 @@ class ChatWindow:
         self.write_memory = True
         self.top_k = 3
         self.turn_count = 0  # 用于追踪轮次编号
-        self.cot_mode = "agent"  # CoT 模式切换：off | brief | agent
 
         # 默认使用 SQLite 后端，保留 txt 兼容路径。
         self.memory_backend = "sqlite"
@@ -40,7 +43,7 @@ class ChatWindow:
         self.memory_chunks = load_memory_chunks(self.memory_file)
 
         settings = get_settings()
-        self.chain = build_qa_chain(settings, cot_mode=self.cot_mode)
+        self.chain = build_qa_chain(settings)
 
         self.root = tk.Tk()
         self.root.title("Agent Chat Demo")
@@ -61,18 +64,6 @@ class ChatWindow:
         )
         status = ttk.Label(status_frame, text=status_text)
         status.pack(side=tk.LEFT, anchor=tk.W)
-
-        ttk.Label(status_frame, text="CoT Mode:").pack(side=tk.RIGHT, padx=(0, 4))
-        self.cot_var = tk.StringVar(value="agent")
-        cot_combo = ttk.Combobox(
-            status_frame,
-            textvariable=self.cot_var,
-            values=["off", "brief", "agent"],
-            state="readonly",
-            width=8,
-        )
-        cot_combo.pack(side=tk.RIGHT)
-        cot_combo.bind("<<ComboboxSelected>>", self._on_cot_mode_changed)
 
         # 主布局：左侧对话窗口，右侧侧边栏
         main_paned = ttk.PanedWindow(container, orient=tk.HORIZONTAL)
@@ -144,44 +135,6 @@ class ChatWindow:
         self.chat_box.configure(state=tk.DISABLED)
         self.chat_box.see(tk.END)
 
-    def _on_cot_mode_changed(self, _event=None) -> None:
-        """切换 CoT 模式时重建链"""
-        new_mode = self.cot_var.get()
-        if new_mode != self.cot_mode:
-            self.cot_mode = new_mode
-            settings = get_settings()
-            self.chain = build_qa_chain(settings, cot_mode=self.cot_mode)
-            self._append_message("assistant", f"已切换到 CoT 模式: {self.cot_mode}")
-
-    def _parse_cot_response(self, response_text: str) -> tuple[str, list[str]]:
-        """解析 CoT JSON 响应，返回 (answer, brief_steps)"""
-        if self.cot_mode == "off":
-            return response_text, []
-
-        text = response_text.strip()
-        if text.startswith("```json") or text.startswith("```"):
-            parts = text.split("```")
-            if len(parts) >= 2:
-                text = parts[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        if text.endswith("```"):
-            text = text[:-3].strip()
-
-        try:
-            payload = json.loads(text)
-            if isinstance(payload, dict):
-                answer = str(payload.get("answer", response_text)).strip()
-                steps = payload.get("brief_steps", [])
-                if isinstance(steps, list):
-                    steps = [str(s).strip() for s in steps if str(s).strip()]
-                return answer, steps
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        return response_text, []
-
     def _append_to_sidebar(
         self,
         turn_num: int,
@@ -189,14 +142,14 @@ class ChatWindow:
         context: str,
         extracted_facts: list[str],
         written_facts: list[str],
-        cot_steps: list[str] | None = None,
         searches: list[dict] | None = None,
+        python_execs: list[dict] | None = None,
     ) -> None:
-        """在侧边栏中记录完整的prompt信息、搜索结果和CoT思路"""
-        if cot_steps is None:
-            cot_steps = []
+        """在侧边栏中记录完整的 prompt 信息和搜索结果。"""
         if searches is None:
             searches = []
+        if python_execs is None:
+            python_execs = []
             
         self.sidebar_box.configure(state=tk.NORMAL)
         
@@ -243,13 +196,17 @@ class ChatWindow:
                 result_preview = results[:300] + "..." if len(results) > 300 else results
                 self.sidebar_box.insert(tk.END, f"{result_preview}\n\n", "context")
 
-        # CoT 思路（如果启用）
-        if cot_steps:
-            self.sidebar_box.insert(tk.END, "CoT Reasoning:\n", "context_header")
-            for step in cot_steps:
-                self.sidebar_box.insert(tk.END, f"• {step}\n", "context")
-            self.sidebar_box.insert(tk.END, "\n", "context")
-        
+        if python_execs:
+            self.sidebar_box.insert(tk.END, "Python Execution:\n", "context_header")
+            for idx, item in enumerate(python_execs, start=1):
+                code = str(item.get("code", "")).strip()
+                result = str(item.get("result", "")).strip()
+                code_preview = code[:300] + "..." if len(code) > 300 else code
+                result_preview = result[:300] + "..." if len(result) > 300 else result
+                self.sidebar_box.insert(tk.END, f"Run {idx} code:\n", "user_query")
+                self.sidebar_box.insert(tk.END, f"{code_preview}\n", "context")
+                self.sidebar_box.insert(tk.END, f"Run {idx} result:\n{result_preview}\n\n", "context")
+
         self.sidebar_box.configure(state=tk.DISABLED)
         self.sidebar_box.see(tk.END)
 
@@ -300,29 +257,29 @@ class ChatWindow:
             self.turn_count += 1
             # 清除上一轮的搜索记录
             clear_search_log()
+            clear_python_exec_log()
             
             retrieved_context = self._build_retrieved_context(user_input)
             response = self.chain.invoke(
                 {"question": user_input, "retrieved_context": retrieved_context},
                 config={"configurable": {"session_id": self.session_id}},
             )
-            # 解析 CoT 响应
-            answer, cot_steps = self._parse_cot_response(str(response))
             # 获取本轮搜索信息
             searches = get_search_log()
+            python_execs = get_python_exec_log()
             
             extracted_facts, written_facts = self._write_long_term_memory(user_input)
             self.root.after(
                 0,
                 self._on_turn_finished,
-                answer,
+                str(response),
                 extracted_facts,
                 written_facts,
                 None,
                 user_input,
                 retrieved_context,
-                cot_steps,
                 searches,
+                python_execs,
             )
         except Exception as exc:  # noqa: BLE001
             self.root.after(0, self._on_turn_finished, "", [], [], str(exc), user_input, "", [], [])
@@ -335,13 +292,13 @@ class ChatWindow:
         error: str | None,
         user_input: str = "",
         retrieved_context: str = "",
-        cot_steps: list[str] | None = None,
         searches: list[dict] | None = None,
+        python_execs: list[dict] | None = None,
     ) -> None:
-        if cot_steps is None:
-            cot_steps = []
         if searches is None:
             searches = []
+        if python_execs is None:
+            python_execs = []
             
         # 记录到侧边栏
         self._append_to_sidebar(
@@ -350,8 +307,8 @@ class ChatWindow:
             retrieved_context,
             extracted_facts,
             written_facts,
-            cot_steps=cot_steps,
             searches=searches,
+            python_execs=python_execs,
         )
         
         if error:
