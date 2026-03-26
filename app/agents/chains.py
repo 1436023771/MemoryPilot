@@ -1,4 +1,5 @@
 from datetime import datetime
+import os
 
 from langchain.agents import create_agent
 from langchain_core.chat_history import BaseChatMessageHistory, InMemoryChatMessageHistory
@@ -91,8 +92,8 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     return _SESSION_STORE[session_id]
 
 
-def build_qa_chain(settings: Settings):
-    """构建仅包含 Agent 模式的问答链。"""
+def _build_agent_chain(settings: Settings):
+    """构建 create_agent 模式问答链。"""
     # 初始化聊天模型，兼容 OpenAI 与 DeepSeek（OpenAI 兼容接口）。
     model = ChatOpenAI(
         model=settings.model_name,
@@ -137,3 +138,17 @@ def build_qa_chain(settings: Settings):
         input_messages_key="question",
         history_messages_key="history",
     )
+
+
+def build_qa_chain(settings: Settings, orchestrator: str | None = None):
+    """构建问答链，支持 `agent` 与 `langgraph` 两种编排。"""
+    mode = (orchestrator or os.getenv("AGENT_ORCHESTRATOR", "agent")).strip().lower()
+    if mode not in {"agent", "langgraph"}:
+        mode = "agent"
+
+    if mode == "langgraph":
+        from app.agents.langgraph_flow import build_langgraph_chain
+
+        return build_langgraph_chain(settings=settings, get_session_history=get_session_history)
+
+    return _build_agent_chain(settings)

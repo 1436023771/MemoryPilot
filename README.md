@@ -110,6 +110,18 @@ Start multi-turn interactive chat:
 python -m app.cli.main --interactive --session-id demo-chat
 ```
 
+Use LangGraph orchestrator for finer control:
+
+```bash
+python -m app.cli.main --interactive --orchestrator langgraph --session-id demo-graph
+```
+
+Or set default orchestrator in environment:
+
+```env
+AGENT_ORCHESTRATOR=langgraph
+```
+
 Start desktop chat window (GUI, defaults to short-term + long-term memory):
 
 ```bash

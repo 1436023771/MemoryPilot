@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import threading
 import tkinter as tk
 from tkinter import scrolledtext, ttk
+
+from dotenv import load_dotenv
 
 from app.agents.chains import build_qa_chain
 from app.agents.chains import get_session_history
@@ -32,6 +35,9 @@ class ChatWindow:
     """简单桌面对话窗口，默认启用长短期记忆。"""
 
     def __init__(self) -> None:
+        # Ensure .env values are available before reading GUI runtime flags.
+        load_dotenv()
+
         self.session_id = "gui-default"
         self.use_rag = True
         self.write_memory = True
@@ -46,9 +52,10 @@ class ChatWindow:
         self.memory_db = Path("memory/long_term_memory.db")
         self.memory_file = Path("memory/long_term_memory.txt")
         self.memory_chunks = load_memory_chunks(self.memory_file)
+        self.orchestrator = os.getenv("AGENT_ORCHESTRATOR", "agent").strip().lower() or "agent"
 
         settings = get_settings()
-        self.chain = build_qa_chain(settings)
+        self.chain = build_qa_chain(settings, orchestrator=self.orchestrator)
 
         self.root = tk.Tk()
         self.root.title("Agent Chat Demo")
@@ -67,7 +74,7 @@ class ChatWindow:
 
         status_text = (
             f"session_id={self.session_id} | backend={self.memory_backend} "
-            f"| rag=on | write_memory=on"
+            f"| orchestrator={self.orchestrator} | rag=on | write_memory=on"
         )
         status = ttk.Label(status_frame, text=status_text)
         status.pack(side=tk.LEFT, anchor=tk.W)
