@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import argparse
-import os
 
 from app.knowledge.embeddings import embed_texts_sentence_transformers
+from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import PgVectorKnowledgeStore
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query PostgreSQL + pgvector knowledge table")
     parser.add_argument("question", help="Question or query text")
-    parser.add_argument("--pg-dsn", default=os.getenv("PGVECTOR_DSN", ""), help="PostgreSQL DSN")
+    parser.add_argument("--pg-dsn", default="", help="PostgreSQL DSN")
     parser.add_argument("--table", default="knowledge_chunks", help="Target table name")
     parser.add_argument("--top-k", type=int, default=5, help="Top-k chunks")
     parser.add_argument("--document-id", default="", help="Optional filter by document_id")
+    parser.add_argument("--book-id", default="", help="Optional filter by book_id")
+    parser.add_argument("--chapter", default="", help="Optional filter by chapter")
     parser.add_argument(
         "--embedding-model",
         default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -24,15 +26,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    pg_dsn = resolve_pg_dsn(args.pg_dsn)
 
-    if not args.pg_dsn:
-        raise ValueError("--pg-dsn is required (or set PGVECTOR_DSN)")
+    if not pg_dsn:
+        raise ValueError(
+            "--pg-dsn is required (or set PGVECTOR_DSN, or PGVECTOR_HOST/PGVECTOR_PORT/PGVECTOR_DBNAME in .env)"
+        )
 
     query_vecs, dim = embed_texts_sentence_transformers([args.question], model_name=args.embedding_model)
     query_vec = query_vecs[0]
 
     store = PgVectorKnowledgeStore(
-        dsn=args.pg_dsn,
+        dsn=pg_dsn,
         table_name=args.table,
         embedding_dim=dim,
     )
@@ -41,6 +46,8 @@ def main() -> None:
         query_embedding=query_vec,
         top_k=args.top_k,
         document_id=args.document_id or None,
+        book_id=args.book_id or None,
+        chapter=args.chapter or None,
     )
 
     if not hits:
@@ -49,6 +56,9 @@ def main() -> None:
 
     for idx, hit in enumerate(hits, start=1):
         print(f"[{idx}] score={hit['score']:.4f}")
+        print(f"book_id: {hit.get('book_id', '')}")
+        print(f"chapter: {hit.get('chapter', '')}")
+        print(f"section: {hit.get('section', '')}")
         print(f"document: {hit['document_id']}")
         print(f"chunk: {hit['chunk_id']}")
         print(hit["content"][:300])

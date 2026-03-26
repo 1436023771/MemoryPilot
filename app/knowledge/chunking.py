@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -44,6 +45,111 @@ def split_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str
     return chunks
 
 
+def _split_long_unit(unit: str, chunk_size: int) -> list[str]:
+    """Split an oversized paragraph by sentence first, then by character fallback."""
+    cleaned = unit.strip()
+    if not cleaned:
+        return []
+    if len(cleaned) <= chunk_size:
+        return [cleaned]
+
+    sentences = [s.strip() for s in re.split(r"(?<=[。！？!?\.])\s+", cleaned) if s.strip()]
+    if len(sentences) <= 1:
+        return split_text(cleaned, chunk_size=chunk_size, overlap=0)
+
+    parts: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for sentence in sentences:
+        sent_len = len(sentence)
+        if sent_len > chunk_size:
+            if current:
+                parts.append(" ".join(current).strip())
+                current = []
+                current_len = 0
+            parts.extend(split_text(sentence, chunk_size=chunk_size, overlap=0))
+            continue
+
+        extra = sent_len if not current else sent_len + 1
+        if current and current_len + extra > chunk_size:
+            parts.append(" ".join(current).strip())
+            current = [sentence]
+            current_len = sent_len
+        else:
+            current.append(sentence)
+            current_len += extra
+
+    if current:
+        parts.append(" ".join(current).strip())
+
+    return [p for p in parts if p]
+
+
+def split_epub_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str]:
+    """Split EPUB text with paragraph-aware windows to reduce narrative breaks."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be > 0")
+    if overlap < 0:
+        raise ValueError("overlap must be >= 0")
+    if overlap >= chunk_size:
+        raise ValueError("overlap must be smaller than chunk_size")
+
+    raw_units = [u.strip() for u in re.split(r"\n\s*\n+", cleaned) if u.strip()]
+    if not raw_units:
+        return split_text(cleaned, chunk_size=chunk_size, overlap=overlap)
+
+    units: list[str] = []
+    for unit in raw_units:
+        units.extend(_split_long_unit(unit, chunk_size=chunk_size))
+
+    if not units:
+        return split_text(cleaned, chunk_size=chunk_size, overlap=overlap)
+
+    overlap_units = max(1, overlap // 240)
+    chunks: list[str] = []
+    i = 0
+    n = len(units)
+
+    while i < n:
+        piece_parts: list[str] = []
+        piece_len = 0
+        j = i
+
+        while j < n:
+            block = units[j]
+            extra = len(block) if not piece_parts else len(block) + 2
+            if piece_parts and piece_len + extra > chunk_size:
+                break
+            piece_parts.append(block)
+            piece_len += extra
+            j += 1
+
+        if not piece_parts:
+            piece_parts = [units[i]]
+            j = i + 1
+
+        merged = "\n\n".join(piece_parts).strip()
+        if merged:
+            chunks.append(merged)
+
+        next_i = max(i + 1, j - overlap_units)
+        i = next_i
+
+    return chunks
+
+
+def split_document_text(text: str, path: str, chunk_size: int = 800, overlap: int = 120) -> list[str]:
+    """Use format-aware chunking strategy by file extension."""
+    suffix = Path(path).suffix.lower()
+    if suffix == ".epub":
+        return split_epub_text(text, chunk_size=chunk_size, overlap=overlap)
+    return split_text(text, chunk_size=chunk_size, overlap=overlap)
+
+
 def _read_pdf(path: Path) -> str:
     try:
         from pypdf import PdfReader
@@ -73,9 +179,19 @@ def _read_epub(path: Path) -> str:
         if not html:
             continue
         soup = BeautifulSoup(html, "html.parser")
-        text = _normalize_whitespace(soup.get_text(separator=" ", strip=True))
-        if text:
-            blocks.append(text)
+        local_parts: list[str] = []
+        for node in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "blockquote"]):
+            text = _normalize_whitespace(node.get_text(separator=" ", strip=True))
+            if text:
+                local_parts.append(text)
+
+        if not local_parts:
+            fallback_text = _normalize_whitespace(soup.get_text(separator=" ", strip=True))
+            if fallback_text:
+                local_parts.append(fallback_text)
+
+        if local_parts:
+            blocks.append("\n\n".join(local_parts))
 
     return "\n".join(blocks).strip()
 

@@ -129,6 +129,33 @@ Query PostgreSQL + pgvector knowledge base:
 python -m app.cli.query_pg_knowledge "这个项目的记忆机制是什么？" --table knowledge_chunks --top-k 5
 ```
 
+Sync bookshelf folders to PostgreSQL + pgvector (series-aware):
+
+```bash
+# First run: set bookshelf path and DSN (saved to memory/bookshelf_sync.json)
+python -m app.cli.sync_bookshelf --bookshelf-path ~/Bookshelf --pg-dsn "$PGVECTOR_DSN" --table knowledge_chunks
+
+# Later: one command to sync current bookshelf state
+python -m app.cli.sync_bookshelf
+```
+
+You can also keep both bookshelf path and DB port config in `.env`:
+
+```env
+BOOKSHELF_PATH=~/Bookshelf
+PGVECTOR_HOST=localhost
+PGVECTOR_PORT=5432
+PGVECTOR_DBNAME=agent_db
+PGVECTOR_USER=postgres
+PGVECTOR_PASSWORD=postgres
+```
+
+Then sync with one command:
+
+```bash
+python -m app.cli.sync_bookshelf
+```
+
 
 5. Run tests:
 
@@ -141,6 +168,18 @@ pytest
 - Ingestion CLI: `python -m app.cli.ingest_pg_knowledge`
 - Query CLI: `python -m app.cli.query_pg_knowledge`
 - Detailed setup: `docs/POSTGRES_PGVECTOR_KNOWLEDGE_SETUP.md`
+
+## Bookshelf Sync (Series -> Books)
+
+- Bookshelf path convention:
+    - `<bookshelf_root>/<series>/<book>/<chapter files>`
+    - `<bookshelf_root>/<series>/<chapter files>` (book defaults to file name)
+- During sync, each chunk gets structured metadata:
+    - `series`, `book_name`, `book_id`, `chapter`, `section`, `relative_path`
+- Useful flags:
+    - `--dry-run`: only scan and print stats, no DB write
+    - `--reset`: truncate target table before sync
+    - `--config-file`: custom config file path (default: `memory/bookshelf_sync.json`)
 
 ## Next Extensions
 
