@@ -383,12 +383,27 @@ class StreamingLanggraphChain:
             config = kwargs["config"]
             if isinstance(config, dict) and "configurable" in config:
                 session_id = config["configurable"].get("session_id")
+
+        session_history = None
+        history_messages: list[BaseMessage] = []
+        if session_id:
+            try:
+                session_history = self._session_history_getter(session_id)
+                existing = getattr(session_history, "messages", [])
+                if isinstance(existing, list):
+                    history_messages.extend(m for m in existing if isinstance(m, BaseMessage))
+            except Exception:  # noqa: BLE001
+                session_history = None
+
+        provided_history = input_data.get("history", [])
+        if isinstance(provided_history, list):
+            history_messages.extend(m for m in provided_history if isinstance(m, BaseMessage))
         
         # 准备输入状态
         state_input = {
             "question": str(input_data.get("question", "")),
             "retrieved_context": str(input_data.get("retrieved_context", "")),
-            "history": input_data.get("history", []),
+            "history": history_messages,
             "stream_messages": [],
         }
         
@@ -399,6 +414,7 @@ class StreamingLanggraphChain:
         seen_tool_message_ids: set[str] = set()
         tool_name_by_call_id: dict[str, str] = {}
         saw_token_delta = False
+        answer_chunks: list[str] = []
 
         def _msg_fp(msg: StreamMessage) -> tuple[str, str, tuple[tuple[str, str], ...]]:
             meta_pairs = tuple(sorted((str(k), str(v)) for k, v in msg.metadata.items()))
@@ -522,6 +538,7 @@ class StreamingLanggraphChain:
                     if not delta_text:
                         continue
                     saw_token_delta = True
+                    answer_chunks.append(delta_text)
                     delta_msg = StreamMessage.final_answer(delta_text, is_delta=True)
                     collected_messages.append(delta_msg)
                     yield delta_msg
@@ -548,10 +565,31 @@ class StreamingLanggraphChain:
                 if not delta_text:
                     continue
                 saw_token_delta = True
+                answer_chunks.append(delta_text)
                 delta_msg = StreamMessage.final_answer(delta_text, is_delta=True)
                 collected_messages.append(delta_msg)
                 yield delta_msg
         
+        final_answer_text = ""
+        if saw_token_delta:
+            final_answer_text = "".join(answer_chunks)
+        elif final_state and "answer" in final_state:
+            final_answer_text = str(final_state.get("answer", "") or "")
+
+        # stream模式不会经过RunnableWithMessageHistory，需手动回写短期会话历史。
+        if session_history is not None:
+            try:
+                question = str(input_data.get("question", "")).strip()
+                to_add: list[BaseMessage] = []
+                if question:
+                    to_add.append(HumanMessage(content=question))
+                if final_answer_text.strip():
+                    to_add.append(AIMessage(content=final_answer_text))
+                if to_add:
+                    session_history.add_messages(to_add)
+            except Exception:  # noqa: BLE001
+                pass
+
         # 确保至少返回一个最终答案消息
         if final_state and "answer" in final_state and not saw_token_delta:
             answer = final_state.get("answer", "")

@@ -1,6 +1,7 @@
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.agents.langgraph_flow import _finalize_node
+from app.agents.langgraph_flow import StreamingLanggraphChain, _finalize_node
 
 
 def test_finalize_returns_answer_and_stream_messages() -> None:
@@ -34,3 +35,44 @@ def test_finalize_handles_empty_messages() -> None:
     assert "stream_messages" in result
     # 应该有一个ERROR消息
     assert any(msg.message_type.value == "error" for msg in result["stream_messages"])
+
+
+def test_stream_mode_persists_session_history() -> None:
+    """测试langgraph stream模式会写入短期会话历史。"""
+
+    class _FakeGraph:
+        def stream(self, *_args, **_kwargs):
+            yield (
+                "updates",
+                {
+                    "finalize": {
+                        "answer": "这是最终答案",
+                        "stream_messages": [],
+                        "messages": [AIMessage(content="这是最终答案")],
+                    }
+                },
+            )
+
+    store: dict[str, InMemoryChatMessageHistory] = {}
+
+    def _get_history(session_id: str):
+        if session_id not in store:
+            store[session_id] = InMemoryChatMessageHistory()
+        return store[session_id]
+
+    chain = StreamingLanggraphChain(_FakeGraph(), _FakeGraph(), None, _get_history, lambda _n: {})
+
+    _ = list(
+        chain.stream(
+            {"question": "请记住这句话", "retrieved_context": ""},
+            session_id="test-session",
+            config={"configurable": {"session_id": "test-session"}},
+        )
+    )
+
+    history = _get_history("test-session")
+    assert len(history.messages) == 2
+    assert isinstance(history.messages[0], HumanMessage)
+    assert isinstance(history.messages[1], AIMessage)
+    assert "请记住这句话" in str(history.messages[0].content)
+    assert "这是最终答案" in str(history.messages[1].content)
