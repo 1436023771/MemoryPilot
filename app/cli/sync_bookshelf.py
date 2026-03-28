@@ -7,6 +7,7 @@ import re
 
 from app.knowledge.chunking import load_text_documents, split_document_text
 from app.knowledge.embeddings import embed_texts_sentence_transformers
+from app.knowledge.narrative_extraction import build_narrative_fields, build_narrative_fields_batch
 from app.knowledge.pg_env import resolve_bookshelf_path, resolve_pg_dsn
 from app.knowledge.pgvector_store import KnowledgeChunk, PgVectorKnowledgeStore
 
@@ -146,9 +147,12 @@ def _build_runtime_config(args: argparse.Namespace) -> dict:
 
 def _build_chunks(bookshelf_root: Path, chunk_size: int, chunk_overlap: int) -> list[KnowledgeChunk]:
     docs = load_text_documents(bookshelf_root)
+    print(f"[INFO] 已加载 {len(docs)} 个文档")
 
     chunks: list[KnowledgeChunk] = []
-    for doc in docs:
+    global_chunk_order = 0
+    
+    for doc_idx, doc in enumerate(docs, 1):
         doc_path = Path(doc.path)
         fields = _derive_bookshelf_fields(doc_path, bookshelf_root)
 
@@ -158,12 +162,40 @@ def _build_chunks(bookshelf_root: Path, chunk_size: int, chunk_overlap: int) -> 
             chunk_size=chunk_size,
             overlap=chunk_overlap,
         )
-        for idx, piece in enumerate(pieces):
+        
+        if not pieces:
+            continue
+
+        print(f"[{doc_idx}/{len(docs)}] 处理文档: {fields['book_id']} / {fields['chapter']} ({len(pieces)} chunks)")
+
+        # 批量处理这个文档的所有 pieces
+        chunk_indices = list(range(len(pieces)))
+        chunk_orders = list(range(global_chunk_order + 1, global_chunk_order + len(pieces) + 1))
+        global_chunk_order += len(pieces)
+
+        narratives = build_narrative_fields_batch(
+            book_id=fields["book_id"],
+            chapter=fields["chapter"],
+            chunk_indices=chunk_indices,
+            chunk_orders=chunk_orders,
+            contents=pieces,
+        )
+        print(f"  └─ LLM 分析完成")
+
+        for idx, piece, narrative in zip(chunk_indices, pieces, narratives):
             chunks.append(
                 KnowledgeChunk(
                     document_id=str(doc_path),
                     chunk_id=f"{idx:06d}",
                     content=piece,
+                    chunk_order=narrative.chunk_order,
+                    timeline_order=narrative.timeline_order,
+                    scene_id=narrative.scene_id,
+                    event_id=narrative.event_id,
+                    narrative_context=narrative.narrative_context,
+                    time_markers=narrative.time_markers,
+                    character_mentions=narrative.character_mentions,
+                    relationship_edges=narrative.relationship_edges,
                     metadata={
                         "source": str(doc_path),
                         "chunk_index": idx,
@@ -173,6 +205,14 @@ def _build_chunks(bookshelf_root: Path, chunk_size: int, chunk_overlap: int) -> 
                         "chapter": fields["chapter"],
                         "section": fields["section"],
                         "relative_path": fields["relative_path"],
+                        "chunk_order": narrative.chunk_order,
+                        "timeline_order": narrative.timeline_order,
+                        "scene_id": narrative.scene_id,
+                        "event_id": narrative.event_id,
+                        "narrative_context": narrative.narrative_context,
+                        "time_markers": narrative.time_markers,
+                        "character_mentions": narrative.character_mentions,
+                        "relationship_edges": narrative.relationship_edges,
                     },
                     book_id=fields["book_id"],
                     chapter=fields["chapter"],

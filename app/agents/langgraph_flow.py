@@ -9,6 +9,7 @@ from typing import TypedDict
 from dotenv import load_dotenv
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessageChunk
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import ToolMessage
@@ -172,7 +173,33 @@ def _assistant_node_factory(model_with_tools):
 
         stream_messages: list[StreamMessage] = []
 
-        resp = model_with_tools.invoke(messages)
+        merged_chunk: AIMessageChunk | None = None
+        try:
+            for chunk in model_with_tools.stream(messages):
+                if not isinstance(chunk, AIMessageChunk):
+                    continue
+                if merged_chunk is None:
+                    merged_chunk = chunk
+                else:
+                    merged_chunk = merged_chunk + chunk
+        except Exception:  # noqa: BLE001
+            merged_chunk = None
+
+        if merged_chunk is None:
+            resp = model_with_tools.invoke(messages)
+        else:
+            # 流式场景下部分 provider 仅返回 tool_call_chunks，不一定能可靠组装 tool_calls。
+            # 出现该情况时回退到 invoke，保证工具路由正确。
+            streamed_tool_calls = getattr(merged_chunk, "tool_calls", None) or []
+            streamed_tool_call_chunks = getattr(merged_chunk, "tool_call_chunks", None) or []
+            if streamed_tool_call_chunks and not streamed_tool_calls:
+                resp = model_with_tools.invoke(messages)
+            else:
+                resp = AIMessage(
+                    content=str(getattr(merged_chunk, "content", "") or ""),
+                    tool_calls=streamed_tool_calls,
+                )
+
         tool_calls = getattr(resp, "tool_calls", None) or []
         if tool_calls:
             for call in tool_calls:
@@ -186,9 +213,6 @@ def _assistant_node_factory(model_with_tools):
                         args=args,
                     )
                 )
-        else:
-            # 无工具调用时保留一条轻量状态，避免界面长时间静默。
-            stream_messages.append(StreamMessage.progress("正在生成回答"))
         
         return {"messages": [resp], "stream_messages": stream_messages}
 
@@ -374,66 +398,162 @@ class StreamingLanggraphChain:
         yielded_fingerprints: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
         seen_tool_message_ids: set[str] = set()
         tool_name_by_call_id: dict[str, str] = {}
+        saw_token_delta = False
 
         def _msg_fp(msg: StreamMessage) -> tuple[str, str, tuple[tuple[str, str], ...]]:
             meta_pairs = tuple(sorted((str(k), str(v)) for k, v in msg.metadata.items()))
             return (msg.message_type.value, msg.content, meta_pairs)
 
-        for step_output in self._graph.stream(state_input, config=kwargs.get("config")):
-            # step_output 是 {node_name: state_dict} 格式
-            for node_name, state in step_output.items():
-                final_state = state
+        def _extract_delta_text(chunk_obj) -> str:
+            if not isinstance(chunk_obj, AIMessageChunk):
+                return ""
+            content = getattr(chunk_obj, "content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                        continue
+                    if isinstance(item, dict):
+                        # OpenAI-compatible content blocks: {"type":"text","text":"..."}
+                        text = item.get("text", "")
+                        if isinstance(text, str) and text:
+                            parts.append(text)
+                return "".join(parts)
+            return ""
 
-                # 增量记录 tool_call_id -> tool_name，供 tools 结果展示。
+        def _handle_update_state(node_name: str, state: dict) -> list[StreamMessage]:
+            nonlocal final_state
+            final_state = state
+
+            out_messages: list[StreamMessage] = []
+
+            # 增量记录 tool_call_id -> tool_name，供 tools 结果展示。
+            state_messages = state.get("messages", [])
+            if isinstance(state_messages, list):
+                for item in state_messages:
+                    if not isinstance(item, AIMessage):
+                        continue
+                    for call in (getattr(item, "tool_calls", None) or []):
+                        call_id = str(call.get("id", "") or "").strip()
+                        call_name = str(call.get("name", "") or "").strip()
+                        if call_id and call_name:
+                            tool_name_by_call_id[call_id] = call_name
+
+            if "stream_messages" in state and state["stream_messages"]:
+                for msg in state["stream_messages"]:
+                    # token delta 允许重复文本，不做内容去重。
+                    is_delta = bool(msg.metadata.get("is_delta", False)) if isinstance(msg.metadata, dict) else False
+                    if msg.message_type == MessageType.FINAL_ANSWER and is_delta:
+                        out_messages.append(msg)
+                        continue
+
+                    # 非增量的 FINAL_ANSWER（通常来自 finalize 节点整段输出）
+                    # 在此统一不透传，避免与 token 流重复。
+                    # 若当前provider不支持token流，函数末尾会用 final_state.answer 做兜底一次性输出。
+                    if msg.message_type == MessageType.FINAL_ANSWER and not is_delta:
+                        continue
+
+                    fp = _msg_fp(msg)
+                    if fp in yielded_fingerprints:
+                        continue
+                    yielded_fingerprints.add(fp)
+                    out_messages.append(msg)
+
+            # 从 tools 节点增量提取工具执行结果，展示真实执行信息。
+            if node_name == "tools":
                 state_messages = state.get("messages", [])
                 if isinstance(state_messages, list):
                     for item in state_messages:
-                        if not isinstance(item, AIMessage):
+                        if not isinstance(item, ToolMessage):
                             continue
-                        for call in (getattr(item, "tool_calls", None) or []):
-                            call_id = str(call.get("id", "") or "").strip()
-                            call_name = str(call.get("name", "") or "").strip()
-                            if call_id and call_name:
-                                tool_name_by_call_id[call_id] = call_name
+                        tool_call_id = str(getattr(item, "tool_call_id", "") or "")
+                        content = str(getattr(item, "content", "") or "").strip()
+                        if not tool_call_id or tool_call_id in seen_tool_message_ids:
+                            continue
+                        seen_tool_message_ids.add(tool_call_id)
 
-                if "stream_messages" in state and state["stream_messages"]:
-                    for msg in state["stream_messages"]:
-                        fp = _msg_fp(msg)
+                        preview = content[:180] + "..." if len(content) > 180 else content
+                        resolved_tool_name = tool_name_by_call_id.get(tool_call_id, "tool")
+                        tool_result_msg = StreamMessage.tool_result(
+                            tool_name=resolved_tool_name,
+                            result=preview or "(empty)",
+                            tool_call_id=tool_call_id,
+                        )
+                        fp = _msg_fp(tool_result_msg)
                         if fp in yielded_fingerprints:
                             continue
                         yielded_fingerprints.add(fp)
+                        out_messages.append(tool_result_msg)
+
+            return out_messages
+
+        graph_stream = None
+        try:
+            graph_stream = self._graph.stream(
+                state_input,
+                config=kwargs.get("config"),
+                stream_mode=["updates", "messages"],
+            )
+        except TypeError:
+            graph_stream = self._graph.stream(state_input, config=kwargs.get("config"))
+
+        for event in graph_stream:
+            # 多 stream_mode 输出：(mode, payload)
+            if isinstance(event, tuple) and len(event) == 2 and isinstance(event[0], str):
+                mode, payload = event
+                if mode == "updates" and isinstance(payload, dict):
+                    for node_name, state in payload.items():
+                        for msg in _handle_update_state(node_name, state):
+                            collected_messages.append(msg)
+                            yield msg
+                elif mode == "messages":
+                    # payload 可能是 (chunk, metadata)
+                    metadata = payload[1] if isinstance(payload, tuple) and len(payload) > 1 else {}
+                    if isinstance(metadata, dict):
+                        node_name = str(metadata.get("langgraph_node", "")).strip()
+                        if node_name and node_name != "assistant":
+                            continue
+
+                    chunk_obj = payload[0] if isinstance(payload, tuple) and payload else payload
+                    delta_text = _extract_delta_text(chunk_obj)
+                    if not delta_text:
+                        continue
+                    saw_token_delta = True
+                    delta_msg = StreamMessage.final_answer(delta_text, is_delta=True)
+                    collected_messages.append(delta_msg)
+                    yield delta_msg
+                continue
+
+            # 兼容旧格式：updates 直接是 dict
+            if isinstance(event, dict):
+                for node_name, state in event.items():
+                    for msg in _handle_update_state(node_name, state):
                         collected_messages.append(msg)
                         yield msg
+                continue
 
-                # 从 tools 节点增量提取工具执行结果，展示真实执行信息。
-                if node_name == "tools":
-                    state_messages = state.get("messages", [])
-                    if isinstance(state_messages, list):
-                        for item in state_messages:
-                            if not isinstance(item, ToolMessage):
-                                continue
-                            tool_call_id = str(getattr(item, "tool_call_id", "") or "")
-                            content = str(getattr(item, "content", "") or "").strip()
-                            if not tool_call_id or tool_call_id in seen_tool_message_ids:
-                                continue
-                            seen_tool_message_ids.add(tool_call_id)
+            # 兼容旧格式：messages 直接是 (chunk, metadata)
+            if isinstance(event, tuple) and len(event) == 2:
+                metadata = event[1]
+                if isinstance(metadata, dict):
+                    node_name = str(metadata.get("langgraph_node", "")).strip()
+                    if node_name and node_name != "assistant":
+                        continue
 
-                            preview = content[:180] + "..." if len(content) > 180 else content
-                            resolved_tool_name = tool_name_by_call_id.get(tool_call_id, "tool")
-                            tool_result_msg = StreamMessage.tool_result(
-                                tool_name=resolved_tool_name,
-                                result=preview or "(empty)",
-                                tool_call_id=tool_call_id,
-                            )
-                            fp = _msg_fp(tool_result_msg)
-                            if fp in yielded_fingerprints:
-                                continue
-                            yielded_fingerprints.add(fp)
-                            collected_messages.append(tool_result_msg)
-                            yield tool_result_msg
+                chunk_obj = event[0]
+                delta_text = _extract_delta_text(chunk_obj)
+                if not delta_text:
+                    continue
+                saw_token_delta = True
+                delta_msg = StreamMessage.final_answer(delta_text, is_delta=True)
+                collected_messages.append(delta_msg)
+                yield delta_msg
         
         # 确保至少返回一个最终答案消息
-        if final_state and "answer" in final_state:
+        if final_state and "answer" in final_state and not saw_token_delta:
             answer = final_state.get("answer", "")
             if answer and (not collected_messages or collected_messages[-1].message_type != MessageType.FINAL_ANSWER):
                 yield StreamMessage.final_answer(answer)

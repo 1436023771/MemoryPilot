@@ -48,6 +48,7 @@ class ChatWindow:
         self.chat_font = ("Menlo", 10)
         self.sidebar_font = ("Menlo", 8)
         self.header_font = ("Menlo", 8, "bold")
+        self.status_font = ("Menlo", 9, "bold")
 
         # 默认使用 SQLite 后端，保留 txt 兼容路径。
         self.memory_backend = "sqlite"
@@ -63,6 +64,7 @@ class ChatWindow:
         self.message_queue: queue.Queue[StreamMessage | None] = queue.Queue(maxsize=10)
         self.is_processing = False  # 标记是否正在处理
         self._current_turn_data = {}  # 存储当前轮次的数据（用于侧边栏显示）
+        self._assistant_stream_open = False
 
         self.root = tk.Tk()
         self.root.title("Agent Chat Demo")
@@ -85,6 +87,29 @@ class ChatWindow:
         )
         status = ttk.Label(status_frame, text=status_text)
         status.pack(side=tk.LEFT, anchor=tk.W)
+
+        # 右上角固定运行状态（胶囊样式）
+        self.runtime_status_var = tk.StringVar(value="")
+        self.runtime_chip = tk.Frame(
+            status_frame,
+            bg="#e7effa",
+            highlightthickness=1,
+            highlightbackground="#9db8de",
+            bd=0,
+        )
+        self.runtime_chip.pack(side=tk.RIGHT, anchor=tk.E)
+        self.runtime_status = tk.Label(
+            self.runtime_chip,
+            textvariable=self.runtime_status_var,
+            bg="#e7effa",
+            fg="#1f4f8a",
+            font=self.status_font,
+            padx=10,
+            pady=3,
+            anchor="e",
+        )
+        self.runtime_status.pack(side=tk.RIGHT)
+        self.runtime_chip.pack_forget()
 
         # 主布局：左侧对话窗口，右侧侧边栏
         main_paned = ttk.PanedWindow(container, orient=tk.HORIZONTAL)
@@ -175,6 +200,56 @@ class ChatWindow:
         self.chat_box.insert(tk.END, f"{prefix}: {text}\n\n", tag)
         self.chat_box.configure(state=tk.DISABLED)
         self.chat_box.see(tk.END)
+
+    def _set_runtime_status(self, text: str) -> None:
+        """更新右上角固定状态文本。"""
+        if not text:
+            self.runtime_status_var.set("")
+            self.runtime_chip.configure(bg="#e7effa", highlightbackground="#9db8de")
+            self.runtime_status.configure(bg="#e7effa", fg="#1f4f8a")
+            self.runtime_chip.pack_forget()
+            return
+
+        if not self.runtime_chip.winfo_ismapped():
+            self.runtime_chip.pack(side=tk.RIGHT, anchor=tk.E)
+
+        display = f"● {text}"
+        self.runtime_status_var.set(display)
+
+        if "失败" in text or "错误" in text:
+            self.runtime_chip.configure(bg="#fdeceb", highlightbackground="#e7a7a3")
+            self.runtime_status.configure(bg="#fdeceb", fg="#9b1c1c")
+        elif text.startswith("执行中"):
+            self.runtime_chip.configure(bg="#e7effa", highlightbackground="#9db8de")
+            self.runtime_status.configure(bg="#e7effa", fg="#1f4f8a")
+        else:
+            self.runtime_chip.configure(bg="#eaf7ea", highlightbackground="#9cc69c")
+            self.runtime_status.configure(bg="#eaf7ea", fg="#1f6b2a")
+
+    def _append_assistant_delta(self, text: str) -> None:
+        """将assistant增量文本追加到同一条消息，避免每个token单独成行。"""
+        if not text:
+            return
+
+        self.chat_box.configure(state=tk.NORMAL)
+        if not self._assistant_stream_open:
+            self.chat_box.insert(tk.END, "Assistant: ", "assistant")
+            self._assistant_stream_open = True
+
+        self.chat_box.insert(tk.END, text, "assistant")
+        self.chat_box.configure(state=tk.DISABLED)
+        self.chat_box.see(tk.END)
+
+    def _finish_assistant_stream(self) -> None:
+        """结束当前assistant流式消息，补齐段落换行。"""
+        if not self._assistant_stream_open:
+            return
+
+        self.chat_box.configure(state=tk.NORMAL)
+        self.chat_box.insert(tk.END, "\n\n", "assistant")
+        self.chat_box.configure(state=tk.DISABLED)
+        self.chat_box.see(tk.END)
+        self._assistant_stream_open = False
 
     def _append_to_sidebar(
         self,
@@ -323,6 +398,7 @@ class ChatWindow:
             return
 
         self.input_var.set("")
+        self._finish_assistant_stream()
         self._append_message("you", user_input)
         self.send_btn.configure(state=tk.DISABLED)
         self.is_processing = True
@@ -342,10 +418,11 @@ class ChatWindow:
             clear_knowledge_retrieval_log()
             clear_python_exec_log()
             
-            self.message_queue.put(StreamMessage.progress("正在检索长期记忆"), block=False)
+            # 用阻塞写入避免 token 高速输出时触发 queue.Full。
+            self.message_queue.put(StreamMessage.progress("正在检索长期记忆"))
             retrieved_context = self._build_retrieved_context(user_input)
             if retrieved_context.strip():
-                self.message_queue.put(StreamMessage.progress("已加载相关长期记忆"), block=False)
+                self.message_queue.put(StreamMessage.progress("已加载相关长期记忆"))
             
             # 使用chain.stream()获取中间消息
             # 如果chain没有stream()方法（agent模式），fallback到invoke
@@ -356,14 +433,14 @@ class ChatWindow:
                     session_id=self.session_id,
                     config={"configurable": {"session_id": self.session_id}},
                 ):
-                    self.message_queue.put(stream_msg, block=False)
+                    self.message_queue.put(stream_msg)
             else:
                 # Fallback：同步模式（不应该发生，因为build_qa_chain总是返回支持stream()的对象）
                 response = self.chain.invoke(
                     {"question": user_input, "retrieved_context": retrieved_context},
                     config={"configurable": {"session_id": self.session_id}},
                 )
-                self.message_queue.put(StreamMessage.final_answer(response), block=False)
+                self.message_queue.put(StreamMessage.final_answer(response))
             
             # 准备侧边栏数据
             extracted_facts, written_facts = self._write_long_term_memory(user_input)
@@ -386,8 +463,15 @@ class ChatWindow:
             self.message_queue.put(None)  # None表示处理完成
             
         except Exception as exc:  # noqa: BLE001
-            self.message_queue.put(StreamMessage.error(f"处理出错: {exc}"), block=False)
-            self.message_queue.put(None)
+            # 某些异常（如 queue.Full）str(exc)为空，补充类型名便于定位。
+            err_text = f"处理出错: {type(exc).__name__}: {exc}" if str(exc) else f"处理出错: {type(exc).__name__}"
+            try:
+                self.message_queue.put(StreamMessage.error(err_text))
+                self.message_queue.put(None)
+            except Exception:  # noqa: BLE001
+                # 极端情况下队列不可用，直接在主线程显示错误并复位输入状态。
+                self.root.after(0, self._append_message, "error", err_text)
+                self.root.after(0, lambda: self.send_btn.configure(state=tk.NORMAL))
 
     def _poll_message_queue(self) -> None:
         """主线程：定期轮询消息队列，处理流式消息。"""
@@ -403,6 +487,8 @@ class ChatWindow:
                     if msg is None:
                         # None表示处理完成，更新侧边栏
                         self.is_processing = False
+                        self._finish_assistant_stream()
+                        self._set_runtime_status("")
                         
                         # 调用_append_to_sidebar记录本轮对话
                         written_facts: list[str] = []
@@ -445,11 +531,13 @@ class ChatWindow:
             self._append_message("error", f"处理消息队列出错: {exc}")
             self.is_processing = False
             self.send_btn.configure(state=tk.NORMAL)
+            self._set_runtime_status("处理失败")
     
     def _handle_stream_message(self, msg: StreamMessage) -> None:
         """处理单个流式消息，根据类型更新UI。"""
         if msg.message_type == MessageType.PROGRESS:
-            self._append_message("memory", f"[执行中] {msg.content}")
+            self._finish_assistant_stream()
+            self._set_runtime_status(f"执行中: {msg.content}")
         
         elif msg.message_type == MessageType.THINKING:
             # 思考消息：可选显示或忽略
@@ -457,34 +545,38 @@ class ChatWindow:
             pass
         
         elif msg.message_type == MessageType.TOOL_START:
+            self._finish_assistant_stream()
             tool_name = str(msg.content or "")
             display_name = str(msg.metadata.get("display_name", tool_name) or tool_name)
             args = msg.metadata.get("args", {})
             if tool_name == "run_python_code":
-                self._append_message("memory", "[执行中] 正在用Python工具做精确计算")
+                self._set_runtime_status("执行中: 正在用Python工具做精确计算")
             elif tool_name == "web_search":
                 query = str(args.get("query", "")).strip() if isinstance(args, dict) else ""
                 suffix = f"：{query}" if query else ""
-                self._append_message("memory", f"[执行中] 正在联网搜索{suffix}")
+                self._set_runtime_status(f"执行中: 正在联网搜索{suffix}")
             elif tool_name == "retrieve_pg_knowledge":
                 query = str(args.get("query", "")).strip() if isinstance(args, dict) else ""
                 suffix = f"：{query}" if query else ""
-                self._append_message("memory", f"[执行中] 正在检索知识库{suffix}")
+                self._set_runtime_status(f"执行中: 正在检索知识库{suffix}")
             else:
-                self._append_message("memory", f"[执行中] 正在调用工具：{display_name}")
+                self._set_runtime_status(f"执行中: 正在调用工具：{display_name}")
         
         elif msg.message_type == MessageType.TOOL_RESULT:
+            self._finish_assistant_stream()
             tool_name = msg.metadata.get("tool_name", "Unknown")
             result = msg.content
             result_preview = result[:200] + "..." if len(result) > 200 else result
             self._append_message("memory", f"[执行结果] {tool_name}: {result_preview}")
         
         elif msg.message_type == MessageType.FINAL_ANSWER:
-            # 最终答案：递增显示到聊天框
-            self._append_message("assistant", msg.content)
+            # 最终答案：递增显示到同一条assistant消息
+            self._append_assistant_delta(msg.content)
         
         elif msg.message_type == MessageType.ERROR:
             # 错误：显示为error标签
+            self._finish_assistant_stream()
+            self._set_runtime_status("处理失败")
             self._append_message("error", msg.content)
 
     def run(self) -> None:
