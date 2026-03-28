@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import argparse
 from pathlib import Path
 import re
 
 from app.knowledge.chunking import load_text_documents, split_document_text
 from app.knowledge.embeddings import embed_texts_sentence_transformers
-from app.knowledge.narrative_extraction import build_narrative_fields, build_narrative_fields_batch
+from app.knowledge.narrative_extraction import build_narrative_fields_batch_async
 from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import KnowledgeChunk, PgVectorKnowledgeStore
+
+
+MAX_CHAPTER_ANALYSIS_CONCURRENCY = 4
 
 
 def _slugify(text: str) -> str:
@@ -78,10 +82,10 @@ def main() -> None:
     docs = load_text_documents(input_path)
     print(f"[INFO] 已加载 {len(docs)} 个文档")
 
-    chunks: list[KnowledgeChunk] = []
+    chapter_groups: list[dict] = []
     base_input_path = input_path.expanduser().resolve()
     global_chunk_order = 0
-    
+
     for doc_idx, doc in enumerate(docs, 1):
         doc_path = Path(doc.path)
         inferred_book_id = _infer_book_id(doc_path=doc_path, input_path=base_input_path, explicit_book_id=args.book_id)
@@ -98,29 +102,66 @@ def main() -> None:
         if not pieces:
             continue
 
-        print(f"[{doc_idx}/{len(docs)}] 处理文档: {inferred_book_id} / {chapter} ({len(pieces)} chunks)")
+        print(f"[{doc_idx}/{len(docs)}] 发现章节: {inferred_book_id} / {chapter} ({len(pieces)} chunks)")
 
-        # 批量处理这个文档的所有 pieces
         chunk_indices = list(range(len(pieces)))
         chunk_orders = list(range(global_chunk_order + 1, global_chunk_order + len(pieces) + 1))
         global_chunk_order += len(pieces)
 
-        narratives = build_narrative_fields_batch(
-            book_id=inferred_book_id,
-            chapter=chapter,
-            chunk_indices=chunk_indices,
-            chunk_orders=chunk_orders,
-            contents=pieces,
+        chapter_groups.append(
+            {
+                "doc_path": doc.path,
+                "inferred_book_id": inferred_book_id,
+                "chapter": chapter,
+                "book_title": book_title,
+                "pieces": pieces,
+                "chunk_indices": chunk_indices,
+                "chunk_orders": chunk_orders,
+            }
         )
-        print(f"  └─ LLM 分析完成")
 
-        for idx, piece, narrative in zip(chunk_indices, pieces, narratives):
+    if not chapter_groups:
+        print("No chunks produced. Nothing to ingest.")
+        return
+
+    async def _analyze_chapter_groups() -> list[list]:
+        semaphore = asyncio.Semaphore(MAX_CHAPTER_ANALYSIS_CONCURRENCY)
+        total = len(chapter_groups)
+
+        async def _analyze_one(i: int, group: dict) -> tuple[int, list]:
+            async with semaphore:
+                print(
+                    f"[{i + 1}/{total}] 异步分析章节: "
+                    f"{group['inferred_book_id']} / {group['chapter']} ({len(group['pieces'])} chunks)"
+                )
+                narratives = await build_narrative_fields_batch_async(
+                    book_id=group["inferred_book_id"],
+                    chapter=group["chapter"],
+                    chunk_indices=group["chunk_indices"],
+                    chunk_orders=group["chunk_orders"],
+                    contents=group["pieces"],
+                )
+                print(f"  └─ LLM 分析完成: {group['inferred_book_id']} / {group['chapter']}")
+                return i, narratives
+
+        tasks = [_analyze_one(i, g) for i, g in enumerate(chapter_groups)]
+        done = await asyncio.gather(*tasks)
+        ordered: list[list] = [[] for _ in chapter_groups]
+        for i, narratives in done:
+            ordered[i] = narratives
+        return ordered
+
+    narratives_by_group = asyncio.run(_analyze_chapter_groups())
+
+    chunks: list[KnowledgeChunk] = []
+    for group, narratives in zip(chapter_groups, narratives_by_group):
+        for idx, piece, narrative in zip(group["chunk_indices"], group["pieces"], narratives):
             chunk = KnowledgeChunk(
-                document_id=doc.path,
+                document_id=group["doc_path"],
                 chunk_id=f"{idx:06d}",
                 content=piece,
-                book_id=inferred_book_id,
-                chapter=chapter,
+                book_id=group["inferred_book_id"],
+                chapter=group["chapter"],
                 section="",
                 chunk_order=narrative.chunk_order,
                 timeline_order=narrative.timeline_order,
@@ -131,11 +172,11 @@ def main() -> None:
                 character_mentions=narrative.character_mentions,
                 relationship_edges=narrative.relationship_edges,
                 metadata={
-                    "source": doc.path,
+                    "source": group["doc_path"],
                     "chunk_index": idx,
-                    "book_id": inferred_book_id,
-                    "book_title": book_title,
-                    "chapter": chapter,
+                    "book_id": group["inferred_book_id"],
+                    "book_title": group["book_title"],
+                    "chapter": group["chapter"],
                     "section": "",
                     "chunk_order": narrative.chunk_order,
                     "timeline_order": narrative.timeline_order,
@@ -148,10 +189,6 @@ def main() -> None:
                 },
             )
             chunks.append(chunk)
-
-    if not chunks:
-        print("No chunks produced. Nothing to ingest.")
-        return
 
     print(f"[INFO] 正在生成向量嵌入（{len(chunks)} chunks）...")
     embeddings, dim = embed_texts_sentence_transformers(

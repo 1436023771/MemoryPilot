@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 from pathlib import Path
@@ -7,9 +8,12 @@ import re
 
 from app.knowledge.chunking import load_text_documents, split_document_text
 from app.knowledge.embeddings import embed_texts_sentence_transformers
-from app.knowledge.narrative_extraction import build_narrative_fields, build_narrative_fields_batch
+from app.knowledge.narrative_extraction import build_narrative_fields_batch_async
 from app.knowledge.pg_env import resolve_bookshelf_path, resolve_pg_dsn
 from app.knowledge.pgvector_store import KnowledgeChunk, PgVectorKnowledgeStore
+
+
+MAX_CHAPTER_ANALYSIS_CONCURRENCY = 4
 
 
 def _slugify(text: str) -> str:
@@ -149,9 +153,9 @@ def _build_chunks(bookshelf_root: Path, chunk_size: int, chunk_overlap: int) -> 
     docs = load_text_documents(bookshelf_root)
     print(f"[INFO] 已加载 {len(docs)} 个文档")
 
-    chunks: list[KnowledgeChunk] = []
+    chapter_groups: list[dict] = []
     global_chunk_order = 0
-    
+
     for doc_idx, doc in enumerate(docs, 1):
         doc_path = Path(doc.path)
         fields = _derive_bookshelf_fields(doc_path, bookshelf_root)
@@ -166,26 +170,62 @@ def _build_chunks(bookshelf_root: Path, chunk_size: int, chunk_overlap: int) -> 
         if not pieces:
             continue
 
-        print(f"[{doc_idx}/{len(docs)}] 处理文档: {fields['book_id']} / {fields['chapter']} ({len(pieces)} chunks)")
+        print(f"[{doc_idx}/{len(docs)}] 发现章节: {fields['book_id']} / {fields['chapter']} ({len(pieces)} chunks)")
 
-        # 批量处理这个文档的所有 pieces
         chunk_indices = list(range(len(pieces)))
         chunk_orders = list(range(global_chunk_order + 1, global_chunk_order + len(pieces) + 1))
         global_chunk_order += len(pieces)
 
-        narratives = build_narrative_fields_batch(
-            book_id=fields["book_id"],
-            chapter=fields["chapter"],
-            chunk_indices=chunk_indices,
-            chunk_orders=chunk_orders,
-            contents=pieces,
+        chapter_groups.append(
+            {
+                "doc_path": str(doc_path),
+                "fields": fields,
+                "pieces": pieces,
+                "chunk_indices": chunk_indices,
+                "chunk_orders": chunk_orders,
+            }
         )
-        print(f"  └─ LLM 分析完成")
 
-        for idx, piece, narrative in zip(chunk_indices, pieces, narratives):
+    if not chapter_groups:
+        return []
+
+    async def _analyze_chapter_groups() -> list[list]:
+        semaphore = asyncio.Semaphore(MAX_CHAPTER_ANALYSIS_CONCURRENCY)
+        total = len(chapter_groups)
+
+        async def _analyze_one(i: int, group: dict) -> tuple[int, list]:
+            fields = group["fields"]
+            async with semaphore:
+                print(
+                    f"[{i + 1}/{total}] 异步分析章节: "
+                    f"{fields['book_id']} / {fields['chapter']} ({len(group['pieces'])} chunks)"
+                )
+                narratives = await build_narrative_fields_batch_async(
+                    book_id=fields["book_id"],
+                    chapter=fields["chapter"],
+                    chunk_indices=group["chunk_indices"],
+                    chunk_orders=group["chunk_orders"],
+                    contents=group["pieces"],
+                )
+                print(f"  └─ LLM 分析完成: {fields['book_id']} / {fields['chapter']}")
+                return i, narratives
+
+        tasks = [_analyze_one(i, g) for i, g in enumerate(chapter_groups)]
+        done = await asyncio.gather(*tasks)
+        ordered: list[list] = [[] for _ in chapter_groups]
+        for i, narratives in done:
+            ordered[i] = narratives
+        return ordered
+
+    narratives_by_group = asyncio.run(_analyze_chapter_groups())
+
+    chunks: list[KnowledgeChunk] = []
+    for group, narratives in zip(chapter_groups, narratives_by_group):
+        fields = group["fields"]
+        for idx, piece, narrative in zip(group["chunk_indices"], group["pieces"], narratives):
             chunks.append(
                 KnowledgeChunk(
-                    document_id=str(doc_path),
+                    document_id=group["doc_path"],
                     chunk_id=f"{idx:06d}",
                     content=piece,
                     chunk_order=narrative.chunk_order,
@@ -197,7 +237,7 @@ def _build_chunks(bookshelf_root: Path, chunk_size: int, chunk_overlap: int) -> 
                     character_mentions=narrative.character_mentions,
                     relationship_edges=narrative.relationship_edges,
                     metadata={
-                        "source": str(doc_path),
+                        "source": group["doc_path"],
                         "chunk_index": idx,
                         "series": fields["series"],
                         "book_name": fields["book_name"],

@@ -5,6 +5,10 @@ from pathlib import Path
 import re
 
 
+_EPUB_TOC_LINE_RE = re.compile(r"^第\s*\d+\s*话$")
+_EPUB_CHAPTER_BREAK = "\n\n[[EPUB_CHAPTER_BREAK]]\n\n"
+
+
 def _normalize_whitespace(text: str) -> str:
     return " ".join((text or "").split())
 
@@ -98,16 +102,30 @@ def split_epub_text(text: str, chunk_size: int = 800, overlap: int = 120) -> lis
     if overlap >= chunk_size:
         raise ValueError("overlap must be smaller than chunk_size")
 
-    raw_units = [u.strip() for u in re.split(r"\n\s*\n+", cleaned) if u.strip()]
+    chapter_texts = [cleaned]
+    if _EPUB_CHAPTER_BREAK in cleaned:
+        chapter_texts = [c.strip() for c in cleaned.split(_EPUB_CHAPTER_BREAK) if c.strip()]
+
+    all_chunks: list[str] = []
+    for chapter_text in chapter_texts:
+        chapter_chunks = _split_epub_body_text(chapter_text, chunk_size=chunk_size, overlap=overlap)
+        all_chunks.extend(chapter_chunks)
+
+    return all_chunks
+
+
+def _split_epub_body_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Split a single EPUB chapter body into paragraph-aware windows."""
+    raw_units = [u.strip() for u in re.split(r"\n\s*\n+", text) if u.strip()]
     if not raw_units:
-        return split_text(cleaned, chunk_size=chunk_size, overlap=overlap)
+        return split_text(text, chunk_size=chunk_size, overlap=overlap)
 
     units: list[str] = []
     for unit in raw_units:
         units.extend(_split_long_unit(unit, chunk_size=chunk_size))
 
     if not units:
-        return split_text(cleaned, chunk_size=chunk_size, overlap=overlap)
+        return split_text(text, chunk_size=chunk_size, overlap=overlap)
 
     overlap_units = max(1, overlap // 240)
     chunks: list[str] = []
@@ -172,6 +190,36 @@ def _read_epub(path: Path) -> str:
             "Reading .epub requires ebooklib and beautifulsoup4. Install with: pip install ebooklib beautifulsoup4"
         ) from exc
 
+    def _is_toc_like_text(text: str) -> bool:
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        if len(lines) < 12:
+            return False
+        matched = sum(1 for line in lines if _EPUB_TOC_LINE_RE.match(line))
+        return matched >= 10 and (matched / max(1, len(lines))) >= 0.6
+
+    def _extract_item_text(soup: BeautifulSoup) -> str:
+        local_parts: list[str] = []
+        for node in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "blockquote"]):
+            text = _normalize_whitespace(node.get_text(separator=" ", strip=True))
+            if text:
+                local_parts.append(text)
+
+        structured_text = "\n\n".join(local_parts).strip()
+        fallback_text = _normalize_whitespace(soup.get_text(separator=" ", strip=True))
+
+        if not structured_text:
+            return fallback_text
+
+        # If only headings/TOC were captured while the page has much more text,
+        # prefer full-page extraction to avoid dropping正文.
+        if _is_toc_like_text(structured_text) and len(fallback_text) >= max(1200, len(structured_text) * 2):
+            return fallback_text
+
+        if len(structured_text) < 240 and len(fallback_text) >= 1200:
+            return fallback_text
+
+        return structured_text
+
     book = epub.read_epub(str(path))
     blocks: list[str] = []
     for item in book.get_items_of_type(ITEM_DOCUMENT):
@@ -179,21 +227,11 @@ def _read_epub(path: Path) -> str:
         if not html:
             continue
         soup = BeautifulSoup(html, "html.parser")
-        local_parts: list[str] = []
-        for node in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "blockquote"]):
-            text = _normalize_whitespace(node.get_text(separator=" ", strip=True))
-            if text:
-                local_parts.append(text)
+        item_text = _extract_item_text(soup)
+        if item_text:
+            blocks.append(item_text)
 
-        if not local_parts:
-            fallback_text = _normalize_whitespace(soup.get_text(separator=" ", strip=True))
-            if fallback_text:
-                local_parts.append(fallback_text)
-
-        if local_parts:
-            blocks.append("\n\n".join(local_parts))
-
-    return "\n".join(blocks).strip()
+    return _EPUB_CHAPTER_BREAK.join(blocks).strip()
 
 
 def _read_text_file(path: Path) -> str:
