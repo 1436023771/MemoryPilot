@@ -20,8 +20,9 @@ agent/
 .env
 
 # Local memory database files
-memory/*.db
-memory/*.db-*
+# memory/*.db
+# memory/*.db-*
+memory/
 
 # IDE files
 .vscode/
