@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import queue
 import threading
 import tkinter as tk
 from tkinter import scrolledtext, ttk
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 
 from app.agents.chains import build_qa_chain
 from app.agents.chains import get_session_history
+from app.agents.stream_messages import StreamMessage, MessageType
 from app.core.config import get_settings
 from app.memory.read_only_memory import load_memory_chunks, retrieve_memory_context
 from app.memory.sqlite_memory import (
@@ -56,6 +58,11 @@ class ChatWindow:
 
         settings = get_settings()
         self.chain = build_qa_chain(settings, orchestrator=self.orchestrator)
+        
+        # 流式消息队列：后台线程put消息，主线程轮询处理
+        self.message_queue: queue.Queue[StreamMessage | None] = queue.Queue(maxsize=10)
+        self.is_processing = False  # 标记是否正在处理
+        self._current_turn_data = {}  # 存储当前轮次的数据（用于侧边栏显示）
 
         self.root = tk.Tk()
         self.root.title("Agent Chat Demo")
@@ -238,9 +245,32 @@ class ChatWindow:
             for item in knowledge_hits:
                 query = str(item.get("query", "")).strip()
                 result = str(item.get("result", "")).strip()
+                auxiliary = item.get("auxiliary", {}) if isinstance(item, dict) else {}
                 result_preview = result[:300] + "..." if len(result) > 300 else result
                 self.sidebar_box.insert(tk.END, f"Query: {query}\n", "user_query")
                 self.sidebar_box.insert(tk.END, f"{result_preview}\n\n", "context")
+
+                if isinstance(auxiliary, dict) and auxiliary:
+                    used = bool(auxiliary.get("rerank_used", False))
+                    fallback = str(auxiliary.get("rerank_fallback", "")).strip()
+                    prompt = str(auxiliary.get("rerank_prompt", "")).strip()
+                    response = str(auxiliary.get("rerank_response", "")).strip()
+                    prompt_preview = prompt[:350] + "..." if len(prompt) > 350 else prompt
+                    response_preview = response[:350] + "..." if len(response) > 350 else response
+
+                    self.sidebar_box.insert(
+                        tk.END,
+                        f"Aux rerank used: {used}"
+                        + (f" (fallback={fallback})" if fallback else "")
+                        + "\n",
+                        "context",
+                    )
+                    if prompt_preview:
+                        self.sidebar_box.insert(tk.END, "Aux rerank prompt:\n", "context_header")
+                        self.sidebar_box.insert(tk.END, f"{prompt_preview}\n", "context")
+                    if response_preview:
+                        self.sidebar_box.insert(tk.END, "Aux rerank response:\n", "context_header")
+                        self.sidebar_box.insert(tk.END, f"{response_preview}\n\n", "context")
 
         if python_execs:
             self.sidebar_box.insert(tk.END, "Python Execution:\n", "context_header")
@@ -295,10 +325,16 @@ class ChatWindow:
         self.input_var.set("")
         self._append_message("you", user_input)
         self.send_btn.configure(state=tk.DISABLED)
-
+        self.is_processing = True
+        
+        # 启动后台线程处理流式消息
         threading.Thread(target=self._process_turn, args=(user_input,), daemon=True).start()
+        
+        # 启动主线程轮询队列（非阻塞）
+        self._poll_message_queue()
 
     def _process_turn(self, user_input: str) -> None:
+        """后台线程：流式处理一轮对话，将消息放入队列。"""
         try:
             self.turn_count += 1
             # 清除上一轮的搜索记录
@@ -306,78 +342,150 @@ class ChatWindow:
             clear_knowledge_retrieval_log()
             clear_python_exec_log()
             
+            self.message_queue.put(StreamMessage.progress("正在检索长期记忆"), block=False)
             retrieved_context = self._build_retrieved_context(user_input)
-            response = self.chain.invoke(
-                {"question": user_input, "retrieved_context": retrieved_context},
-                config={"configurable": {"session_id": self.session_id}},
-            )
-            # 获取本轮搜索信息
+            if retrieved_context.strip():
+                self.message_queue.put(StreamMessage.progress("已加载相关长期记忆"), block=False)
+            
+            # 使用chain.stream()获取中间消息
+            # 如果chain没有stream()方法（agent模式），fallback到invoke
+            if hasattr(self.chain, 'stream'):
+                # 流式模式
+                for stream_msg in self.chain.stream(
+                    {"question": user_input, "retrieved_context": retrieved_context},
+                    session_id=self.session_id,
+                    config={"configurable": {"session_id": self.session_id}},
+                ):
+                    self.message_queue.put(stream_msg, block=False)
+            else:
+                # Fallback：同步模式（不应该发生，因为build_qa_chain总是返回支持stream()的对象）
+                response = self.chain.invoke(
+                    {"question": user_input, "retrieved_context": retrieved_context},
+                    config={"configurable": {"session_id": self.session_id}},
+                )
+                self.message_queue.put(StreamMessage.final_answer(response), block=False)
+            
+            # 准备侧边栏数据
+            extracted_facts, written_facts = self._write_long_term_memory(user_input)
             searches = get_search_log()
             knowledge_hits = get_knowledge_retrieval_log()
             python_execs = get_python_exec_log()
             
-            extracted_facts, written_facts = self._write_long_term_memory(user_input)
-            self.root.after(
-                0,
-                self._on_turn_finished,
-                str(response),
-                extracted_facts,
-                written_facts,
-                None,
-                user_input,
-                retrieved_context,
-                searches,
-                knowledge_hits,
-                python_execs,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.root.after(0, self._on_turn_finished, "", [], [], str(exc), user_input, "", [], [], [])
-
-    def _on_turn_finished(
-        self,
-        response: str,
-        extracted_facts: list[str],
-        written_facts: list[str],
-        error: str | None,
-        user_input: str = "",
-        retrieved_context: str = "",
-        searches: list[dict] | None = None,
-        knowledge_hits: list[dict] | None = None,
-        python_execs: list[dict] | None = None,
-    ) -> None:
-        if searches is None:
-            searches = []
-        if knowledge_hits is None:
-            knowledge_hits = []
-        if python_execs is None:
-            python_execs = []
+            # 保存当前轮次数据，供主线程调用_append_to_sidebar
+            self._current_turn_data = {
+                "user_input": user_input,
+                "retrieved_context": retrieved_context,
+                "extracted_facts": extracted_facts,
+                "written_facts": written_facts,
+                "searches": searches,
+                "knowledge_hits": knowledge_hits,
+                "python_execs": python_execs,
+            }
             
-        # 记录到侧边栏
-        self._append_to_sidebar(
-            self.turn_count,
-            user_input,
-            retrieved_context,
-            extracted_facts,
-            written_facts,
-            searches=searches,
-            knowledge_hits=knowledge_hits,
-            python_execs=python_execs,
-        )
-        
-        if error:
-            self._append_message("error", error)
-            self.send_btn.configure(state=tk.NORMAL)
-            self.input_entry.focus_set()
+            # 放入一个特殊的信号，标记处理完成
+            self.message_queue.put(None)  # None表示处理完成
+            
+        except Exception as exc:  # noqa: BLE001
+            self.message_queue.put(StreamMessage.error(f"处理出错: {exc}"), block=False)
+            self.message_queue.put(None)
+
+    def _poll_message_queue(self) -> None:
+        """主线程：定期轮询消息队列，处理流式消息。"""
+        if not self.is_processing:
             return
-
-        self._append_message("assistant", response)
-        if written_facts:
-            self._append_message("memory", "wrote facts:")
-            for fact in written_facts:
-                self._append_message("memory", f"- {fact}")
-
-        self.send_btn.configure(state=tk.NORMAL)
-        self.input_entry.focus_set()
+        
+        try:
+            # 非阻塞读取队列（timeout=0意为立即返回，如果队列为空则抛出Empty异常）
+            while True:
+                try:
+                    msg = self.message_queue.get_nowait()
+                    
+                    if msg is None:
+                        # None表示处理完成，更新侧边栏
+                        self.is_processing = False
+                        
+                        # 调用_append_to_sidebar记录本轮对话
+                        written_facts: list[str] = []
+                        if self._current_turn_data:
+                            written_facts = self._current_turn_data.get("written_facts", [])
+                            self._append_to_sidebar(
+                                self.turn_count,
+                                self._current_turn_data.get("user_input", ""),
+                                self._current_turn_data.get("retrieved_context", ""),
+                                self._current_turn_data.get("extracted_facts", []),
+                                self._current_turn_data.get("written_facts", []),
+                                searches=self._current_turn_data.get("searches", []),
+                                knowledge_hits=self._current_turn_data.get("knowledge_hits", []),
+                                python_execs=self._current_turn_data.get("python_execs", []),
+                            )
+                            self._current_turn_data = {}
+                        
+                        # 显示写入的记忆
+                        if written_facts:
+                            self._append_message("memory", "已记录:")
+                            for fact in written_facts:
+                                self._append_message("memory", f"- {fact}")
+                        
+                        self.send_btn.configure(state=tk.NORMAL)
+                        self.input_entry.focus_set()
+                        return
+                    
+                    # 处理流式消息
+                    self._handle_stream_message(msg)
+                    
+                except queue.Empty:
+                    # 队列为空，继续轮询
+                    break
+            
+            # 继续定期轮询（100ms）
+            if self.is_processing:
+                self.root.after(100, self._poll_message_queue)
+                
+        except Exception as exc:  # noqa: BLE001
+            self._append_message("error", f"处理消息队列出错: {exc}")
+            self.is_processing = False
+            self.send_btn.configure(state=tk.NORMAL)
+    
+    def _handle_stream_message(self, msg: StreamMessage) -> None:
+        """处理单个流式消息，根据类型更新UI。"""
+        if msg.message_type == MessageType.PROGRESS:
+            self._append_message("memory", f"[执行中] {msg.content}")
+        
+        elif msg.message_type == MessageType.THINKING:
+            # 思考消息：可选显示或忽略
+            # self._append_message("memory", f"[思考] {msg.content}")
+            pass
+        
+        elif msg.message_type == MessageType.TOOL_START:
+            tool_name = str(msg.content or "")
+            display_name = str(msg.metadata.get("display_name", tool_name) or tool_name)
+            args = msg.metadata.get("args", {})
+            if tool_name == "run_python_code":
+                self._append_message("memory", "[执行中] 正在用Python工具做精确计算")
+            elif tool_name == "web_search":
+                query = str(args.get("query", "")).strip() if isinstance(args, dict) else ""
+                suffix = f"：{query}" if query else ""
+                self._append_message("memory", f"[执行中] 正在联网搜索{suffix}")
+            elif tool_name == "retrieve_pg_knowledge":
+                query = str(args.get("query", "")).strip() if isinstance(args, dict) else ""
+                suffix = f"：{query}" if query else ""
+                self._append_message("memory", f"[执行中] 正在检索知识库{suffix}")
+            else:
+                self._append_message("memory", f"[执行中] 正在调用工具：{display_name}")
+        
+        elif msg.message_type == MessageType.TOOL_RESULT:
+            tool_name = msg.metadata.get("tool_name", "Unknown")
+            result = msg.content
+            result_preview = result[:200] + "..." if len(result) > 200 else result
+            self._append_message("memory", f"[执行结果] {tool_name}: {result_preview}")
+        
+        elif msg.message_type == MessageType.FINAL_ANSWER:
+            # 最终答案：递增显示到聊天框
+            self._append_message("assistant", msg.content)
+        
+        elif msg.message_type == MessageType.ERROR:
+            # 错误：显示为error标签
+            self._append_message("error", msg.content)
 
     def run(self) -> None:
         self.input_entry.focus_set()

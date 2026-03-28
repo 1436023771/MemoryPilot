@@ -15,6 +15,11 @@ from app.knowledge.pgvector_store import PgVectorKnowledgeStore
 
 _knowledge_retrieval_log: list[dict] = []
 
+try:
+    from langsmith import tracing_context
+except Exception:  # noqa: BLE001
+    tracing_context = None
+
 
 def get_knowledge_retrieval_log() -> list[dict]:
     """Return a copy of current turn knowledge retrieval log."""
@@ -27,16 +32,19 @@ def clear_knowledge_retrieval_log() -> None:
     _knowledge_retrieval_log = []
 
 
-def record_knowledge_retrieval(query: str, result: str) -> None:
+def record_knowledge_retrieval(query: str, result: str, auxiliary: dict | None = None) -> None:
     """Record retrieval query and formatted result for GUI sidebar display."""
     global _knowledge_retrieval_log
-    _knowledge_retrieval_log.append({"query": query, "result": result})
+    item = {"query": query, "result": result}
+    if auxiliary:
+        item["auxiliary"] = auxiliary
+    _knowledge_retrieval_log.append(item)
 
 
-def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> list[dict]:
+def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> tuple[list[dict], dict]:
     """Rerank retrieved chunks by relevance using a lightweight LLM judging step."""
     if not hits:
-        return []
+        return [], {}
 
     settings = get_settings()
     model = ChatOpenAI(
@@ -71,7 +79,11 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> list[dict
         + "\n\n".join(candidates)
     )
 
-    response = model.invoke(prompt)
+    if tracing_context is not None:
+        with tracing_context(enabled=False):
+            response = model.invoke(prompt)
+    else:
+        response = model.invoke(prompt)
     content = str(getattr(response, "content", response)).strip()
     if content.startswith("```json"):
         content = content[7:]
@@ -81,9 +93,25 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> list[dict
         content = content[:-3]
     content = content.strip()
 
-    data = json.loads(content)
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        fallback = hits[: max(1, int(top_k))]
+        return fallback, {
+            "rerank_prompt": prompt,
+            "rerank_response": content,
+            "rerank_used": False,
+            "rerank_fallback": "invalid_json_parse",
+        }
+
     if not isinstance(data, list):
-        return hits[: max(1, int(top_k))]
+        fallback = hits[: max(1, int(top_k))]
+        return fallback, {
+            "rerank_prompt": prompt,
+            "rerank_response": content,
+            "rerank_used": False,
+            "rerank_fallback": "invalid_json_array",
+        }
 
     by_id: dict[int, dict] = {}
     for item in data:
@@ -103,10 +131,21 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> list[dict
         by_id[idx] = selected
 
     if not by_id:
-        return hits[: max(1, int(top_k))]
+        fallback = hits[: max(1, int(top_k))]
+        return fallback, {
+            "rerank_prompt": prompt,
+            "rerank_response": content,
+            "rerank_used": False,
+            "rerank_fallback": "empty_valid_selection",
+        }
 
     ranked = sorted(by_id.values(), key=lambda h: float(h.get("rerank_score", 0.0)), reverse=True)
-    return ranked[: max(1, int(top_k))]
+    return ranked[: max(1, int(top_k))], {
+        "rerank_prompt": prompt,
+        "rerank_response": content,
+        "rerank_used": True,
+        "rerank_fallback": "",
+    }
 
 
 def _format_hits(store: PgVectorKnowledgeStore, hits: list[dict], max_items: int = 5, context_window: int = 2) -> str:
@@ -214,14 +253,21 @@ def retrieve_pg_knowledge(
             return result
 
         reranked_hits = hits[: max(1, int(top_k))]
+        rerank_aux: dict = {}
         try:
-            reranked_hits = _rerank_hits_with_llm(
+            reranked_hits, rerank_aux = _rerank_hits_with_llm(
                 query=clean_query,
                 hits=hits,
                 top_k=max(1, int(top_k)),
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             reranked_hits = hits[: max(1, int(top_k))]
+            rerank_aux = {
+                "rerank_prompt": "",
+                "rerank_response": "",
+                "rerank_used": False,
+                "rerank_fallback": f"exception:{exc}",
+            }
 
         body = _format_hits(
             store=store,
@@ -230,7 +276,13 @@ def retrieve_pg_knowledge(
             context_window=max(0, int(context_window)),
         )
         result = f"知识库检索结果:\n{body}"
-        record_knowledge_retrieval(clean_query, result)
+        auxiliary = {
+            "rerank_used": bool(rerank_aux.get("rerank_used", False)),
+            "rerank_fallback": str(rerank_aux.get("rerank_fallback", "")).strip(),
+            "rerank_prompt": str(rerank_aux.get("rerank_prompt", ""))[:1200],
+            "rerank_response": str(rerank_aux.get("rerank_response", ""))[:1200],
+        }
+        record_knowledge_retrieval(clean_query, result, auxiliary=auxiliary)
         return result
     except Exception as exc:  # noqa: BLE001
         result = f"知识检索失败: {exc}"

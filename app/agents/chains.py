@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+from typing import Iterator
 
 from langchain.agents import create_agent
 from langchain_core.chat_history import BaseChatMessageHistory, InMemoryChatMessageHistory
@@ -12,6 +13,7 @@ from langchain_openai import ChatOpenAI
 
 from app.core.config import Settings
 from app.agents.tools import retrieve_pg_knowledge, run_python_code, web_search
+from app.agents.stream_messages import StreamMessage, MessageType
 
 
 # 进程内会话仓库：key 是 session_id，value 是该会话的消息历史。
@@ -151,4 +153,42 @@ def build_qa_chain(settings: Settings, orchestrator: str | None = None):
 
         return build_langgraph_chain(settings=settings, get_session_history=get_session_history)
 
-    return _build_agent_chain(settings)
+    # Agent模式：返回支持stream()的包装
+    base_chain = _build_agent_chain(settings)
+    return StreamingQAChain(base_chain)
+
+
+class StreamingQAChain:
+    """为agent chain添加流式输出支持的包装器。
+    
+    由于agent模式不像langgraph那样有中间步骤，这里采用简化方案：
+    - invoke() 直接返回答案
+    - stream() 模拟流式输出（返回PROGRESS->FINAL_ANSWER消息）
+    """
+    
+    def __init__(self, base_chain):
+        self._base_chain = base_chain
+    
+    def invoke(self, input_data: dict, **kwargs) -> str:
+        """同步调用，返回最终答案。"""
+        return self._base_chain.invoke(input_data, **kwargs)
+    
+    def stream(self, input_data: dict, session_id: str | None = None, **kwargs) -> Iterator[StreamMessage]:
+        """流式模拟：由于agent模式无中间步骤，返回PROGRESS后立即返回答案。
+        
+        Args:
+            input_data: 输入数据（包含question, retrieved_context等）
+            session_id: 会话ID
+            **kwargs: 传递给invoke的参数
+        
+        Yields:
+            StreamMessage对象
+        """
+        # Agent模式无法真正流式，所以先发进度，再发答案
+        yield StreamMessage.progress("正在处理您的问题...")
+        
+        try:
+            answer = self._base_chain.invoke(input_data, **kwargs)
+            yield StreamMessage.final_answer(answer)
+        except Exception as exc:
+            yield StreamMessage.error(f"处理出错: {exc}")

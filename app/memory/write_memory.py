@@ -11,6 +11,11 @@ from langchain_openai import ChatOpenAI
 from app.core.config import get_settings
 from app.memory.fallback import extract_candidate_facts_single_turn, extract_structured_facts_regex
 
+try:
+    from langsmith import tracing_context
+except Exception:  # noqa: BLE001
+    tracing_context = None
+
 
 @dataclass(frozen=True)
 class MemoryFact:
@@ -139,7 +144,11 @@ def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 
 
 没有可保存信息时返回 []。不要输出任何额外文本。"""
 
-        response = model.invoke(prompt)
+        if tracing_context is not None:
+            with tracing_context(enabled=False):
+                response = model.invoke(prompt)
+        else:
+            response = model.invoke(prompt)
         if hasattr(response, "content"):
             json_str = str(response.content).strip()
         else:

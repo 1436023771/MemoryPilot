@@ -8,6 +8,11 @@ from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
 
+try:
+    from langsmith import tracing_context
+except Exception:  # noqa: BLE001
+    tracing_context = None
+
 FactTuple = tuple[str, str, str]
 
 
@@ -93,7 +98,11 @@ def extract_candidate_facts_single_turn(
 
 没有符合条件的信息时返回 []"""
 
-        response = model.invoke(prompt)
+        if tracing_context is not None:
+            with tracing_context(enabled=False):
+                response = model.invoke(prompt)
+        else:
+            response = model.invoke(prompt)
         if hasattr(response, "content"):
             json_str = str(response.content).strip()
         else:

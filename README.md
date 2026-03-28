@@ -122,6 +122,19 @@ Or set default orchestrator in environment:
 AGENT_ORCHESTRATOR=langgraph
 ```
 
+Enable LangSmith tracing for LangGraph node-level monitoring:
+
+```env
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=your_langsmith_api_key_here
+LANGCHAIN_PROJECT=agent-langgraph
+LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+```
+
+When tracing is enabled, LangGraph runs are reported with:
+- graph run name: `langgraph_qa_chain`
+- node run names: `lg_plan`, `lg_retrieve_knowledge`, `lg_build_prompt`, `lg_assistant`, `lg_tools`, `lg_finalize`
+
 Start desktop chat window (GUI, defaults to short-term + long-term memory):
 
 ```bash
