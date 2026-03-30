@@ -14,6 +14,62 @@ class Settings:
     temperature: float = 0.2
 
 
+def get_env_int(name: str, default: int, min_value: int | None = None) -> int:
+    """Read int env var with default and optional lower bound."""
+    load_dotenv()
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        value = int(default)
+    else:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a valid integer value.") from exc
+
+    if min_value is not None and value < min_value:
+        raise ValueError(f"{name} must be >= {min_value}.")
+    return value
+
+
+def get_env_float(
+    name: str,
+    default: float,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    """Read float env var with default and optional bounds."""
+    load_dotenv()
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        value = float(default)
+    else:
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a valid float value.") from exc
+
+    if min_value is not None and value < min_value:
+        raise ValueError(f"{name} must be >= {min_value}.")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{name} must be <= {max_value}.")
+    return value
+
+
+def get_env_bool(name: str, default: bool) -> bool:
+    """Read bool env var with flexible true/false text values."""
+    load_dotenv()
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return bool(default)
+
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+
+    raise ValueError(f"{name} must be a boolean value (true/false).")
+
+
 def get_settings() -> Settings:
     """从环境变量读取并校验运行配置。"""
     # 先加载 .env 文件，再读取环境变量。

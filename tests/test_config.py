@@ -1,6 +1,6 @@
 import pytest
 
-from app.core.config import get_settings
+from app.core.config import get_env_bool, get_env_float, get_env_int, get_settings
 
 
 def test_deepseek_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,3 +33,26 @@ def test_openai_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.api_key == "test-openai-key"
     assert settings.base_url is None
     assert settings.model_name == "gpt-4.1-mini"
+
+
+def test_get_env_int_and_float(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KNOWLEDGE_TOP_K_DEFAULT", "7")
+    monkeypatch.setenv("KNOWLEDGE_BLEND_WEIGHT_LLM", "0.75")
+
+    assert get_env_int("KNOWLEDGE_TOP_K_DEFAULT", default=5, min_value=1) == 7
+    assert get_env_float("KNOWLEDGE_BLEND_WEIGHT_LLM", default=0.6, min_value=0.0) == 0.75
+
+
+def test_get_env_int_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KNOWLEDGE_TOP_K_DEFAULT", "abc")
+
+    with pytest.raises(ValueError, match="KNOWLEDGE_TOP_K_DEFAULT"):
+        get_env_int("KNOWLEDGE_TOP_K_DEFAULT", default=5, min_value=1)
+
+
+def test_get_env_bool_accepts_common_literals(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KNOWLEDGE_SYNC_INCREMENTAL", "yes")
+    assert get_env_bool("KNOWLEDGE_SYNC_INCREMENTAL", default=False) is True
+
+    monkeypatch.setenv("KNOWLEDGE_SYNC_INCREMENTAL", "off")
+    assert get_env_bool("KNOWLEDGE_SYNC_INCREMENTAL", default=True) is False

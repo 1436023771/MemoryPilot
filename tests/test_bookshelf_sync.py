@@ -2,7 +2,9 @@ from pathlib import Path
 
 import app.knowledge.narrative_extraction as narrative_extraction
 from app.cli.sync_bookshelf import _build_chunks
+from app.cli.sync_bookshelf import _content_hash
 from app.cli.sync_bookshelf import _derive_bookshelf_fields
+from app.cli.sync_bookshelf import _plan_incremental_documents
 
 
 def test_derive_bookshelf_fields_series_book_structure(tmp_path: Path) -> None:
@@ -71,3 +73,78 @@ def test_build_chunks_contains_deterministic_narrative_fields(tmp_path: Path, mo
     assert first.timeline_order == first.chunk_order
     assert first.scene_id
     assert first.event_id
+
+
+def test_plan_incremental_documents_skips_unchanged_and_detects_removed(tmp_path: Path) -> None:
+    root = tmp_path / "bookshelf"
+    keep_file = root / "Series A" / "Book One" / "01_intro.md"
+    keep_file.parent.mkdir(parents=True, exist_ok=True)
+    keep_file.write_text("same content", encoding="utf-8")
+
+    removed_file = root / "Series A" / "Book One" / "02_removed.md"
+    removed_file_abs = str(removed_file.resolve())
+
+    st = keep_file.stat()
+    keep_abs = str(keep_file.resolve())
+    previous_documents = {
+        keep_abs: {
+            "mtime_ns": int(st.st_mtime_ns),
+            "size": int(st.st_size),
+            "content_hash": _content_hash("same content"),
+            "chunk_count": 1,
+            "last_synced_at": 1,
+        },
+        removed_file_abs: {
+            "mtime_ns": 1,
+            "size": 1,
+            "content_hash": "x",
+            "chunk_count": 1,
+            "last_synced_at": 1,
+        },
+    }
+
+    docs, next_docs, removed_docs, stats, _hashes = _plan_incremental_documents(
+        bookshelf_root=root,
+        previous_documents=previous_documents,
+        incremental=True,
+        full_rebuild=False,
+        hash_check=True,
+    )
+
+    assert docs == []
+    assert removed_docs == [removed_file_abs]
+    assert stats["unchanged"] == 1
+    assert keep_abs in next_docs
+
+
+def test_plan_incremental_documents_uses_hash_check_to_skip_false_positive_changes(tmp_path: Path) -> None:
+    root = tmp_path / "bookshelf"
+    chapter_file = root / "Series A" / "Book One" / "01_intro.md"
+    chapter_file.parent.mkdir(parents=True, exist_ok=True)
+    chapter_file.write_text("constant text", encoding="utf-8")
+
+    st = chapter_file.stat()
+    key = str(chapter_file.resolve())
+    previous_documents = {
+        key: {
+            "mtime_ns": int(st.st_mtime_ns),
+            "size": int(st.st_size),
+            "content_hash": _content_hash("constant text"),
+            "chunk_count": 1,
+            "last_synced_at": 1,
+        }
+    }
+
+    chapter_file.touch()
+
+    docs, _next_docs, _removed_docs, stats, _hashes = _plan_incremental_documents(
+        bookshelf_root=root,
+        previous_documents=previous_documents,
+        incremental=True,
+        full_rebuild=False,
+        hash_check=True,
+    )
+
+    assert docs == []
+    assert stats["changed"] == 0
+    assert stats["unchanged"] == 1

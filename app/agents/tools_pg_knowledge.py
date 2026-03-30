@@ -10,7 +10,7 @@ from typing import Any
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
-from app.core.config import get_settings
+from app.core.config import get_env_float, get_env_int, get_settings
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import PgVectorKnowledgeStore
@@ -164,6 +164,25 @@ def _to_str_list(value) -> list[str]:
     return []
 
 
+def _local_rerank_weights() -> tuple[float, float, float]:
+    semantic = get_env_float("KNOWLEDGE_LOCAL_RERANK_WEIGHT_SEMANTIC", 0.5, min_value=0.0)
+    character = get_env_float("KNOWLEDGE_LOCAL_RERANK_WEIGHT_CHARACTER", 0.35, min_value=0.0)
+    timeline = get_env_float("KNOWLEDGE_LOCAL_RERANK_WEIGHT_TIMELINE", 0.15, min_value=0.0)
+    weight_sum = semantic + character + timeline
+    if weight_sum <= 0.0:
+        return 0.5, 0.35, 0.15
+    return semantic / weight_sum, character / weight_sum, timeline / weight_sum
+
+
+def _blend_weights() -> tuple[float, float]:
+    llm = get_env_float("KNOWLEDGE_BLEND_WEIGHT_LLM", 0.6, min_value=0.0)
+    local = get_env_float("KNOWLEDGE_BLEND_WEIGHT_LOCAL", 0.4, min_value=0.0)
+    weight_sum = llm + local
+    if weight_sum <= 0.0:
+        return 0.6, 0.4
+    return llm / weight_sum, local / weight_sum
+
+
 def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> tuple[list[dict], dict]:
     """Apply deterministic rerank with character continuity and timeline coherence."""
     if not hits:
@@ -190,6 +209,7 @@ def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> t
         anchor_chars = [name for name, _ in counter.most_common(3)]
 
     reranked: list[dict] = []
+    w_semantic, w_character, w_timeline = _local_rerank_weights()
     for hit in hits:
         chars = _to_str_list(hit.get("character_mentions", []))
         char_set = set(chars)
@@ -216,7 +236,7 @@ def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> t
         # Semantic base from vector similarity score field.
         semantic = _normalize_score_0_1(float(hit.get("score", 0.0)), lower=0.0, upper=1.0)
 
-        local_score = 0.5 * semantic + 0.35 * character_score + 0.15 * timeline_score
+        local_score = w_semantic * semantic + w_character * character_score + w_timeline * timeline_score
 
         enriched = dict(hit)
         enriched["local_semantic_score"] = round(semantic * 100.0, 2)
@@ -408,11 +428,11 @@ def _format_hits(store: PgVectorKnowledgeStore, hits: list[dict], max_items: int
 @tool
 def retrieve_pg_knowledge(
     query: str,
-    top_k: int = 5,
+    top_k: int = 0,
     book_id: str = "",
     chapter: str = "",
-    context_window: int = 2,
-    rerank_candidates: int = 12,
+    context_window: int = -1,
+    rerank_candidates: int = 0,
 ) -> str:
     """Retrieve relevant chunks from PostgreSQL + pgvector knowledge base.
 
@@ -421,11 +441,13 @@ def retrieve_pg_knowledge(
 
     Args:
         query: Search query text.
-        top_k: Number of chunks to return.
+        top_k: Number of chunks to return. <=0 时读取环境变量 KNOWLEDGE_TOP_K_DEFAULT。
         book_id: Optional exact filter of book_id.
         chapter: Optional exact filter of chapter.
         context_window: Neighbor chunk window for returning longer context around a hit.
+            <0 时读取环境变量 KNOWLEDGE_CONTEXT_WINDOW_DEFAULT。
         rerank_candidates: Candidate pool size for LLM relevance reranking before final output.
+            <=0 时读取环境变量 KNOWLEDGE_RERANK_CANDIDATES_DEFAULT。
     """
     clean_query = (query or "").strip()
     if not clean_query:
@@ -465,9 +487,25 @@ def retrieve_pg_knowledge(
             book_id=clean_book_id,
             candidate_characters=character_candidates,
         )
+        effective_top_k = int(top_k)
+        if effective_top_k <= 0:
+            effective_top_k = get_env_int("KNOWLEDGE_TOP_K_DEFAULT", default=5, min_value=1)
+
+        effective_context_window = int(context_window)
+        if effective_context_window < 0:
+            effective_context_window = get_env_int("KNOWLEDGE_CONTEXT_WINDOW_DEFAULT", default=2, min_value=0)
+
+        effective_rerank_candidates = int(rerank_candidates)
+        if effective_rerank_candidates <= 0:
+            effective_rerank_candidates = get_env_int(
+                "KNOWLEDGE_RERANK_CANDIDATES_DEFAULT",
+                default=12,
+                min_value=2,
+            )
+
         hits = store.similarity_search(
             query_embedding=query_vecs[0],
-            top_k=max(max(1, int(top_k)), max(2, int(rerank_candidates))),
+            top_k=max(effective_top_k, effective_rerank_candidates),
             book_id=clean_book_id,
             chapter=clean_chapter,
         )
@@ -480,26 +518,27 @@ def retrieve_pg_knowledge(
         # Step 1: deterministic local rerank (character continuity + timeline coherence).
         locally_reranked, local_aux = _apply_role_timeline_rerank(hits, query_analysis)
 
-        reranked_hits = locally_reranked[: max(1, int(top_k))]
+        reranked_hits = locally_reranked[:effective_top_k]
         rerank_aux: dict = {}
         try:
             llm_reranked_hits, rerank_aux = _rerank_hits_with_llm(
                 query=clean_query,
                 hits=locally_reranked,
-                top_k=max(1, int(top_k)),
+                top_k=effective_top_k,
             )
             # Blend LLM and local signals to avoid losing deterministic continuity constraints.
+            w_llm, w_local = _blend_weights()
             blended: list[dict] = []
             for hit in llm_reranked_hits:
                 llm_score = float(hit.get("rerank_score", 0.0) or 0.0)
                 local_score = float(hit.get("local_rerank_score", 0.0) or 0.0)
                 hit2 = dict(hit)
-                hit2["blended_rerank_score"] = round(0.6 * llm_score + 0.4 * local_score, 2)
+                hit2["blended_rerank_score"] = round(w_llm * llm_score + w_local * local_score, 2)
                 blended.append(hit2)
             blended.sort(key=lambda h: float(h.get("blended_rerank_score", 0.0)), reverse=True)
-            reranked_hits = blended[: max(1, int(top_k))]
+            reranked_hits = blended[:effective_top_k]
         except Exception as exc:  # noqa: BLE001
-            reranked_hits = locally_reranked[: max(1, int(top_k))]
+            reranked_hits = locally_reranked[:effective_top_k]
             rerank_aux = {
                 "rerank_prompt": "",
                 "rerank_response": "",
@@ -510,8 +549,8 @@ def retrieve_pg_knowledge(
         body = _format_hits(
             store=store,
             hits=reranked_hits,
-            max_items=max(1, int(top_k)),
-            context_window=max(0, int(context_window)),
+            max_items=effective_top_k,
+            context_window=max(0, effective_context_window),
         )
         result = f"知识库检索结果:\n{body}"
         auxiliary = {

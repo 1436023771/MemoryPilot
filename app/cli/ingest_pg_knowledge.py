@@ -6,13 +6,11 @@ from pathlib import Path
 import re
 
 from app.knowledge.chunking import load_text_documents, split_document_text
+from app.core.config import get_env_int
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.narrative_extraction import build_narrative_fields_batch_async
 from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import KnowledgeChunk, PgVectorKnowledgeStore
-
-
-MAX_CHAPTER_ANALYSIS_CONCURRENCY = 4
 
 
 def _slugify(text: str) -> str:
@@ -49,6 +47,10 @@ def _infer_chapter(doc_path: Path) -> str:
     stem = doc_path.stem
     stem = re.sub(r"^[0-9]+[\._\-\s]*", "", stem)
     return _clean_title(stem)
+
+
+def _chapter_analysis_concurrency() -> int:
+    return get_env_int("KNOWLEDGE_CHAPTER_ANALYSIS_CONCURRENCY", default=4, min_value=1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,7 +127,7 @@ def main() -> None:
         return
 
     async def _analyze_chapter_groups() -> list[list]:
-        semaphore = asyncio.Semaphore(MAX_CHAPTER_ANALYSIS_CONCURRENCY)
+        semaphore = asyncio.Semaphore(_chapter_analysis_concurrency())
         total = len(chapter_groups)
 
         async def _analyze_one(i: int, group: dict) -> tuple[int, list]:
