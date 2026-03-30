@@ -32,10 +32,7 @@
   - `stream()` 方法通过 `graph.stream()` 获取中间状态
 
 ### 3. **后端适配层** (`app/agents/chains.py`)
-- 添加 `StreamingQAChain` 包装器为 Agent 模式添加流式支持
-  - Agent 模式由于无中间步骤，采用简化方案：返回 PROGRESS（处理中）→ FINAL_ANSWER（答案）
-  
-- 修改 `build_qa_chain()` 返回支持流式的链对象
+- `build_qa_chain()` 统一返回 LangGraph 流式链对象（LangGraph-only）
 
 ### 4. **GUI改造** (`app/ui/gui_chat.py`)
 - 添加 `message_queue`（线程安全队列）接收后台线程的流式消息
@@ -64,7 +61,7 @@
 - 13个单元测试覆盖：
   - `StreamMessage` 创建、转换、快捷方法
   - `StreamingLanggraphChain` 的 invoke/stream 接口
-  - `StreamingQAChain` 的 stream 接口
+  - LangGraph-only chain 的 stream/invoke 接口
   - 消息类型定义和值
 
 ## 使用效果
@@ -95,7 +92,7 @@
 
 - 所有链仍然支持 `invoke()` 方法（同步调用），保持向后兼容
 - 现有代码无需改动，可直接使用新的流式功能
-- LangGraph 和 Agent 两种模式都支持流式
+- LangGraph-only 模式支持流式
 
 ## 后续改进方向
 
@@ -124,7 +121,7 @@ pytest tests/test_langgraph_gui_regression.py -v
 
 ### 手动测试GUI
 ```bash
-AGENT_ORCHESTRATOR=langgraph python -m app.ui.gui_chat
+python -m app.ui.gui_chat
 ```
 
 输入一个查询（如"《恋人不行》中关于记忆的设定是什么？"），观察：
@@ -134,6 +131,5 @@ AGENT_ORCHESTRATOR=langgraph python -m app.ui.gui_chat
 
 ## 关键配置
 
-- `AGENT_ORCHESTRATOR` 环境变量：选择 "langgraph" 或 "agent" 模式
 - 消息队列大小：`maxsize=10`（防止积压）
 - 轮询间隔：`100ms`（平衡响应性和CPU使用）

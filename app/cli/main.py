@@ -64,12 +64,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print facts written to long-term memory in current turn",
     )
-    parser.add_argument(
-        "--orchestrator",
-        choices=["agent", "langgraph"],
-        default="agent",
-        help="Orchestration backend for conversation pipeline",
-    )
     return parser.parse_args()
 
 
@@ -139,11 +133,10 @@ def run_single_turn(
     memory_db: Path,
     memory_backend: str,
     show_memory_write: bool,
-    orchestrator: str,
 ) -> None:
     # 单轮模式：构建链后仅调用一次。
     settings = get_settings()
-    chain = build_qa_chain(settings, orchestrator=orchestrator)
+    chain = build_qa_chain(settings)
 
     retrieved_context = _build_retrieved_context(
         question=question,
@@ -182,11 +175,10 @@ def run_interactive(
     memory_db: Path,
     memory_backend: str,
     show_memory_write: bool,
-    orchestrator: str,
 ) -> None:
     # 交互模式：同一进程内循环对话，可连续复用短期记忆。
     settings = get_settings()
-    chain = build_qa_chain(settings, orchestrator=orchestrator)
+    chain = build_qa_chain(settings)
     print(f"Interactive chat started (session_id={session_id}). Type 'exit' to quit.")
 
     while True:
@@ -247,7 +239,6 @@ def main() -> None:
             memory_db=memory_db,
             memory_backend=args.memory_backend,
             show_memory_write=args.show_memory_write,
-            orchestrator=args.orchestrator,
         )
         return
 
@@ -263,7 +254,6 @@ def main() -> None:
         memory_db=memory_db,
         memory_backend=args.memory_backend,
         show_memory_write=args.show_memory_write,
-        orchestrator=args.orchestrator,
     )
 
 

@@ -69,7 +69,7 @@ class TestStreamingChain:
         
         # 构建langgraph chain
         settings = get_settings()
-        chain = build_qa_chain(settings, orchestrator="langgraph")
+        chain = build_qa_chain(settings)
         
         # 检查是否有stream方法
         assert hasattr(chain, 'stream'), "chain should have stream() method"
@@ -81,26 +81,25 @@ class TestStreamingChain:
         from app.core.config import get_settings
         
         settings = get_settings()
-        chain = build_qa_chain(settings, orchestrator="langgraph")
+        chain = build_qa_chain(settings)
         
         # 检查是否有invoke方法
         assert hasattr(chain, 'invoke'), "chain should have invoke() method"
         assert callable(getattr(chain, 'invoke')), "invoke should be callable"
 
 
-class TestStreamingQAChain:
-    """测试StreamingQAChain包装器。"""
-    
-    def test_streaming_qa_chain_has_stream_method(self):
-        """测试StreamingQAChain有stream()方法。"""
+class TestLanggraphOnlyChain:
+    """测试LangGraph-only链行为。"""
+
+    def test_langgraph_only_chain_has_stream_method(self):
+        """LangGraph-only模式下chain应提供stream方法。"""
         from app.agents.chains import build_qa_chain
         from app.core.config import get_settings
-        
+
         settings = get_settings()
-        chain = build_qa_chain(settings, orchestrator="agent")
-        
-        # Agent chain通过StreamingQAChain包装
-        assert hasattr(chain, 'stream'), "StreamingQAChain should have stream() method"
+        chain = build_qa_chain(settings)
+
+        assert hasattr(chain, 'stream'), "chain should have stream() method"
         assert callable(getattr(chain, 'stream')), "stream should be callable"
 
 

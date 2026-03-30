@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import queue
 import threading
@@ -19,9 +18,11 @@ from app.memory.sqlite_memory import (
     write_facts_to_sqlite,
 )
 from app.agents.tools import (
+    clear_docker_exec_log,
     clear_knowledge_retrieval_log,
     clear_python_exec_log,
     clear_search_log,
+    get_docker_exec_log,
     get_knowledge_retrieval_log,
     get_python_exec_log,
     get_search_log,
@@ -55,10 +56,9 @@ class ChatWindow:
         self.memory_db = Path("memory/long_term_memory.db")
         self.memory_file = Path("memory/long_term_memory.txt")
         self.memory_chunks = load_memory_chunks(self.memory_file)
-        self.orchestrator = os.getenv("AGENT_ORCHESTRATOR", "agent").strip().lower() or "agent"
 
         settings = get_settings()
-        self.chain = build_qa_chain(settings, orchestrator=self.orchestrator)
+        self.chain = build_qa_chain(settings)
         
         # 流式消息队列：后台线程put消息，主线程轮询处理
         self.message_queue: queue.Queue[StreamMessage | None] = queue.Queue(maxsize=10)
@@ -83,7 +83,7 @@ class ChatWindow:
 
         status_text = (
             f"session_id={self.session_id} | backend={self.memory_backend} "
-            f"| orchestrator={self.orchestrator} | rag=on | write_memory=on"
+            "| orchestrator=langgraph | rag=on | write_memory=on"
         )
         status = ttk.Label(status_frame, text=status_text)
         status.pack(side=tk.LEFT, anchor=tk.W)
@@ -261,6 +261,7 @@ class ChatWindow:
         searches: list[dict] | None = None,
         knowledge_hits: list[dict] | None = None,
         python_execs: list[dict] | None = None,
+        docker_execs: list[dict] | None = None,
     ) -> None:
         """在侧边栏中记录完整的 prompt 信息和搜索结果。"""
         if searches is None:
@@ -269,6 +270,8 @@ class ChatWindow:
             knowledge_hits = []
         if python_execs is None:
             python_execs = []
+        if docker_execs is None:
+            docker_execs = []
             
         self.sidebar_box.configure(state=tk.NORMAL)
         
@@ -358,6 +361,18 @@ class ChatWindow:
                 self.sidebar_box.insert(tk.END, f"{code_preview}\n", "context")
                 self.sidebar_box.insert(tk.END, f"Run {idx} result:\n{result_preview}\n\n", "context")
 
+        if docker_execs:
+            self.sidebar_box.insert(tk.END, "Docker Sandbox Execution:\n", "context_header")
+            for idx, item in enumerate(docker_execs, start=1):
+                mode = str(item.get("mode", "shell")).strip()
+                command = str(item.get("command", "")).strip()
+                result = str(item.get("result", "")).strip()
+                command_preview = command[:300] + "..." if len(command) > 300 else command
+                result_preview = result[:300] + "..." if len(result) > 300 else result
+                self.sidebar_box.insert(tk.END, f"Run {idx} mode: {mode}\n", "user_query")
+                self.sidebar_box.insert(tk.END, f"Run {idx} command:\n{command_preview}\n", "context")
+                self.sidebar_box.insert(tk.END, f"Run {idx} result:\n{result_preview}\n\n", "context")
+
         self.sidebar_box.configure(state=tk.DISABLED)
         self.sidebar_box.see(tk.END)
 
@@ -417,6 +432,7 @@ class ChatWindow:
             clear_search_log()
             clear_knowledge_retrieval_log()
             clear_python_exec_log()
+            clear_docker_exec_log()
             
             # 用阻塞写入避免 token 高速输出时触发 queue.Full。
             self.message_queue.put(StreamMessage.progress("正在检索长期记忆"))
@@ -424,29 +440,20 @@ class ChatWindow:
             if retrieved_context.strip():
                 self.message_queue.put(StreamMessage.progress("已加载相关长期记忆"))
             
-            # 使用chain.stream()获取中间消息
-            # 如果chain没有stream()方法（agent模式），fallback到invoke
-            if hasattr(self.chain, 'stream'):
-                # 流式模式
-                for stream_msg in self.chain.stream(
-                    {"question": user_input, "retrieved_context": retrieved_context},
-                    session_id=self.session_id,
-                    config={"configurable": {"session_id": self.session_id}},
-                ):
-                    self.message_queue.put(stream_msg)
-            else:
-                # Fallback：同步模式（不应该发生，因为build_qa_chain总是返回支持stream()的对象）
-                response = self.chain.invoke(
-                    {"question": user_input, "retrieved_context": retrieved_context},
-                    config={"configurable": {"session_id": self.session_id}},
-                )
-                self.message_queue.put(StreamMessage.final_answer(response))
+            # 使用 chain.stream() 获取中间消息。
+            for stream_msg in self.chain.stream(
+                {"question": user_input, "retrieved_context": retrieved_context},
+                session_id=self.session_id,
+                config={"configurable": {"session_id": self.session_id}},
+            ):
+                self.message_queue.put(stream_msg)
             
             # 准备侧边栏数据
             extracted_facts, written_facts = self._write_long_term_memory(user_input)
             searches = get_search_log()
             knowledge_hits = get_knowledge_retrieval_log()
             python_execs = get_python_exec_log()
+            docker_execs = get_docker_exec_log()
             
             # 保存当前轮次数据，供主线程调用_append_to_sidebar
             self._current_turn_data = {
@@ -457,6 +464,7 @@ class ChatWindow:
                 "searches": searches,
                 "knowledge_hits": knowledge_hits,
                 "python_execs": python_execs,
+                "docker_execs": docker_execs,
             }
             
             # 放入一个特殊的信号，标记处理完成
@@ -503,6 +511,7 @@ class ChatWindow:
                                 searches=self._current_turn_data.get("searches", []),
                                 knowledge_hits=self._current_turn_data.get("knowledge_hits", []),
                                 python_execs=self._current_turn_data.get("python_execs", []),
+                                docker_execs=self._current_turn_data.get("docker_execs", []),
                             )
                             self._current_turn_data = {}
                         
@@ -559,6 +568,10 @@ class ChatWindow:
                 query = str(args.get("query", "")).strip() if isinstance(args, dict) else ""
                 suffix = f"：{query}" if query else ""
                 self._set_runtime_status(f"执行中: 正在检索知识库{suffix}")
+            elif tool_name == "run_docker_command":
+                command = str(args.get("command", "")).strip() if isinstance(args, dict) else ""
+                suffix = f"：{command[:60]}" if command else ""
+                self._set_runtime_status(f"执行中: 正在执行Docker沙箱命令{suffix}")
             else:
                 self._set_runtime_status(f"执行中: 正在调用工具：{display_name}")
         

@@ -10,7 +10,16 @@ from typing import Any
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
-from app.core.config import get_env_float, get_env_int, get_settings
+from app.core.config import get_settings
+from app.agents.knowledge_config import (
+    pgvector_table,
+    pgvector_embedding_model,
+    local_rerank_weights,
+    blend_weights,
+    top_k_default,
+    context_window_default,
+    rerank_candidates_default,
+)
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import PgVectorKnowledgeStore
@@ -165,22 +174,11 @@ def _to_str_list(value) -> list[str]:
 
 
 def _local_rerank_weights() -> tuple[float, float, float]:
-    semantic = get_env_float("KNOWLEDGE_LOCAL_RERANK_WEIGHT_SEMANTIC", 0.5, min_value=0.0)
-    character = get_env_float("KNOWLEDGE_LOCAL_RERANK_WEIGHT_CHARACTER", 0.35, min_value=0.0)
-    timeline = get_env_float("KNOWLEDGE_LOCAL_RERANK_WEIGHT_TIMELINE", 0.15, min_value=0.0)
-    weight_sum = semantic + character + timeline
-    if weight_sum <= 0.0:
-        return 0.5, 0.35, 0.15
-    return semantic / weight_sum, character / weight_sum, timeline / weight_sum
+    return local_rerank_weights()
 
 
 def _blend_weights() -> tuple[float, float]:
-    llm = get_env_float("KNOWLEDGE_BLEND_WEIGHT_LLM", 0.6, min_value=0.0)
-    local = get_env_float("KNOWLEDGE_BLEND_WEIGHT_LOCAL", 0.4, min_value=0.0)
-    weight_sum = llm + local
-    if weight_sum <= 0.0:
-        return 0.6, 0.4
-    return llm / weight_sum, local / weight_sum
+    return blend_weights()
 
 
 def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> tuple[list[dict], dict]:
@@ -461,11 +459,8 @@ def retrieve_pg_knowledge(
         record_knowledge_retrieval(clean_query, result)
         return result
 
-    table = os.getenv("PGVECTOR_TABLE", "knowledge_chunks").strip() or "knowledge_chunks"
-    embedding_model = os.getenv(
-        "PGVECTOR_EMBEDDING_MODEL",
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    ).strip()
+    table = pgvector_table()
+    embedding_model = pgvector_embedding_model()
 
     try:
         query_vecs, dim = embed_texts_sentence_transformers([clean_query], model_name=embedding_model)
@@ -489,19 +484,15 @@ def retrieve_pg_knowledge(
         )
         effective_top_k = int(top_k)
         if effective_top_k <= 0:
-            effective_top_k = get_env_int("KNOWLEDGE_TOP_K_DEFAULT", default=5, min_value=1)
+            effective_top_k = top_k_default()
 
         effective_context_window = int(context_window)
         if effective_context_window < 0:
-            effective_context_window = get_env_int("KNOWLEDGE_CONTEXT_WINDOW_DEFAULT", default=2, min_value=0)
+            effective_context_window = context_window_default()
 
         effective_rerank_candidates = int(rerank_candidates)
         if effective_rerank_candidates <= 0:
-            effective_rerank_candidates = get_env_int(
-                "KNOWLEDGE_RERANK_CANDIDATES_DEFAULT",
-                default=12,
-                min_value=2,
-            )
+            effective_rerank_candidates = rerank_candidates_default()
 
         hits = store.similarity_search(
             query_embedding=query_vecs[0],

@@ -22,9 +22,17 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
 
-from app.agents.tools import retrieve_pg_knowledge, run_python_code, web_search
+from app.agents.tools import retrieve_pg_knowledge, run_docker_command, run_python_code, web_search
 from app.agents.stream_messages import StreamMessage, MessageType
-from app.core.config import Settings, get_env_int
+from app.agents.langgraph_config import (
+    langchain_project,
+    max_history_tokens,
+    DEFAULT_MAX_HISTORY_TOKENS,
+    top_k_default,
+    context_window_default,
+    rerank_candidates_default,
+)
+from app.core.config import Settings
 
 
 DEFAULT_MAX_HISTORY_TOKENS = 1800
@@ -63,7 +71,7 @@ def _node_config(name: str, extra_tags: list[str] | None = None) -> dict:
 
 
 def _graph_config() -> dict:
-    project = os.getenv("LANGCHAIN_PROJECT", "agent-langgraph")
+    project = langchain_project()
     return {
         "run_name": "langgraph_qa_chain",
         "tags": ["langgraph", "qa-flow"],
@@ -122,12 +130,7 @@ def _estimate_message_tokens(msg: BaseMessage) -> int:
 
 
 def _history_token_limit() -> int:
-    raw = os.getenv("MAX_HISTORY_TOKENS", str(DEFAULT_MAX_HISTORY_TOKENS)).strip()
-    try:
-        value = int(raw)
-        return max(300, value)
-    except Exception:  # noqa: BLE001
-        return DEFAULT_MAX_HISTORY_TOKENS
+    return max(300, max_history_tokens())
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -385,9 +388,9 @@ def _knowledge_node(state: QAState) -> QAState:
 
     messages = [StreamMessage.progress("正在检索知识库...")]
     try:
-        default_top_k = get_env_int("KNOWLEDGE_TOP_K_DEFAULT", default=5, min_value=1)
-        default_context_window = get_env_int("KNOWLEDGE_CONTEXT_WINDOW_DEFAULT", default=3, min_value=0)
-        default_rerank_candidates = get_env_int("KNOWLEDGE_RERANK_CANDIDATES_DEFAULT", default=14, min_value=2)
+        default_top_k = top_k_default()
+        default_context_window = context_window_default()
+        default_rerank_candidates = rerank_candidates_default()
         # 先做召回+重排，再把结果回传给回答节点。
         retrieved = retrieve_pg_knowledge.invoke(
             {
@@ -442,6 +445,7 @@ def _build_prompt_node(state: QAState) -> QAState:
 def _tool_display_name(tool_name: str) -> str:
     mapping = {
         "run_python_code": "Python计算器",
+        "run_docker_command": "Docker沙箱",
         "web_search": "联网搜索",
         "retrieve_pg_knowledge": "知识库检索",
     }
@@ -562,7 +566,7 @@ def build_langgraph_chain(
         base_url=settings.base_url,
     )
 
-    model_with_tools = model.bind_tools([web_search, retrieve_pg_knowledge, run_python_code])
+    model_with_tools = model.bind_tools([web_search, retrieve_pg_knowledge, run_python_code, run_docker_command])
 
     graph = StateGraph(QAState)
     graph.add_node("plan", RunnableLambda(_plan_node).with_config(_node_config("plan")))
@@ -577,7 +581,7 @@ def build_langgraph_chain(
     )
     graph.add_node(
         "tools",
-        ToolNode([web_search, retrieve_pg_knowledge, run_python_code]).with_config(
+        ToolNode([web_search, retrieve_pg_knowledge, run_python_code, run_docker_command]).with_config(
             _node_config("tools", ["tool-calls"])
         ),
     )

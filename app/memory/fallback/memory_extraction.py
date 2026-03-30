@@ -79,6 +79,7 @@ def extract_candidate_facts_single_turn(
 3) 判断标准："这句话是不是用户在描述自己的某个属性或信息？"如果答案是"是"才提取
 4) 情景：如果用户提到第三方信息，记为"message"类型
 5) 如果一句话既包含用户信息也包含其他内容，只提取用户信息部分
+6) 用户对助手执行方式的稳定约束属于 preference，应提取
 
 信息类别：
 - name: 用户的姓名
@@ -87,7 +88,7 @@ def extract_candidate_facts_single_turn(
 - dislike: 用户厌恶或不喜欢的事物
 - skill: 用户具备的技能或能力
 - background: 用户的背景信息
-- preference: 用户对交互方式的偏好
+- preference: 用户对交互方式或执行方式的偏好/约束
 - message: 关于他人或其他信息
 
 返回 JSON 数组，格式示例：

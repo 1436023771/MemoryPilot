@@ -84,6 +84,25 @@ MODEL_NAME=deepseek-chat
 TEMPERATURE=0.2
 ```
 
+Docker sandbox (optional, for high-risk operations in container):
+
+```env
+DOCKER_SANDBOX_ENABLED=true
+DOCKER_SANDBOX_IMAGE=python:3.11-slim
+DOCKER_EXEC_TIMEOUT=30
+DOCKER_MEMORY_LIMIT=512m
+DOCKER_CPU_LIMIT=1
+DOCKER_PIDS_LIMIT=128
+DOCKER_NETWORK_MODE=bridge
+# Optional persistent workspace mount
+DOCKER_SANDBOX_WORKDIR=~/agent_sandbox_workspace
+```
+
+Notes:
+- `run_python_code` now executes inside Docker sandbox and does not fall back to host execution.
+- New tool `run_docker_command` is available for shell/file/network operations in the container.
+- If `DOCKER_SANDBOX_ENABLED=false`, sandbox tools return an explicit error instead of running on host.
+
 4. Run the demo chain:
 
 ```bash
@@ -110,17 +129,7 @@ Start multi-turn interactive chat:
 python -m app.cli.main --interactive --session-id demo-chat
 ```
 
-Use LangGraph orchestrator for finer control:
-
-```bash
-python -m app.cli.main --interactive --orchestrator langgraph --session-id demo-graph
-```
-
-Or set default orchestrator in environment:
-
-```env
-AGENT_ORCHESTRATOR=langgraph
-```
+The conversation pipeline is LangGraph-only by default.
 
 Enable LangSmith tracing for LangGraph node-level monitoring:
 

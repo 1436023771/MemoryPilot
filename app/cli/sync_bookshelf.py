@@ -9,7 +9,14 @@ from pathlib import Path
 import re
 import time
 
-from app.core.config import get_env_bool, get_env_int
+from app.cli.sync_bookshelf_config import (
+    chapter_analysis_concurrency,
+    incremental_enabled,
+    auto_delete_removed,
+    hash_check_enabled,
+    show_incremental_stats,
+    state_file_path,
+)
 from app.knowledge.chunking import TextDocument, load_text_documents, split_document_text
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.narrative_extraction import build_narrative_fields_batch_async
@@ -90,30 +97,6 @@ def _load_sync_config(config_file: Path) -> dict:
 def _save_sync_config(config_file: Path, config: dict) -> None:
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _chapter_analysis_concurrency() -> int:
-    return get_env_int("KNOWLEDGE_CHAPTER_ANALYSIS_CONCURRENCY", default=4, min_value=1)
-
-
-def _default_incremental_enabled() -> bool:
-    return get_env_bool("KNOWLEDGE_SYNC_INCREMENTAL", default=True)
-
-
-def _default_auto_delete_removed() -> bool:
-    return get_env_bool("KNOWLEDGE_SYNC_AUTO_DELETE_REMOVED", default=True)
-
-
-def _default_hash_check() -> bool:
-    return get_env_bool("KNOWLEDGE_SYNC_HASH_CHECK", default=True)
-
-
-def _default_show_incremental_stats() -> bool:
-    return get_env_bool("KNOWLEDGE_SYNC_SHOW_INCREMENTAL_STATS", default=True)
-
-
-def _default_state_file_path() -> str:
-    return os.getenv("KNOWLEDGE_SYNC_STATE_FILE", "memory/bookshelf_sync_state.json").strip() or "memory/bookshelf_sync_state.json"
 
 
 def _content_hash(text: str) -> str:
@@ -222,15 +205,15 @@ def _build_runtime_config(args: argparse.Namespace) -> dict:
         "chunk_overlap": args.chunk_overlap
         if args.chunk_overlap is not None
         else int(saved.get("chunk_overlap", 120)),
-        "state_file": args.state_file.strip() or str(saved.get("state_file", _default_state_file_path())),
-        "incremental": args.incremental if args.incremental is not None else bool(saved.get("incremental", _default_incremental_enabled())),
+        "state_file": args.state_file.strip() or str(saved.get("state_file", state_file_path())),
+        "incremental": args.incremental if args.incremental is not None else bool(saved.get("incremental", incremental_enabled())),
         "auto_delete_removed": args.auto_delete_removed
         if args.auto_delete_removed is not None
-        else bool(saved.get("auto_delete_removed", _default_auto_delete_removed())),
-        "hash_check": args.hash_check if args.hash_check is not None else bool(saved.get("hash_check", _default_hash_check())),
+        else bool(saved.get("auto_delete_removed", auto_delete_removed())),
+        "hash_check": args.hash_check if args.hash_check is not None else bool(saved.get("hash_check", hash_check_enabled())),
         "show_incremental_stats": args.show_incremental_stats
         if args.show_incremental_stats is not None
-        else bool(saved.get("show_incremental_stats", _default_show_incremental_stats())),
+        else bool(saved.get("show_incremental_stats", show_incremental_stats())),
     }
 
     if not runtime["bookshelf_path"]:
@@ -293,7 +276,7 @@ def _build_chunks_for_documents(
         return []
 
     async def _analyze_chapter_groups() -> list[list]:
-        semaphore = asyncio.Semaphore(_chapter_analysis_concurrency())
+        semaphore = asyncio.Semaphore(chapter_analysis_concurrency())
         total = len(chapter_groups)
 
         async def _analyze_one(i: int, group: dict) -> tuple[int, list]:
