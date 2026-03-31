@@ -11,6 +11,7 @@ from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.core.prompt_store import render_prompt
 from app.agents.knowledge_config import (
     pgvector_table,
     pgvector_embedding_model,
@@ -89,16 +90,10 @@ def _analyze_query_with_llm(query: str, candidate_characters: list[str]) -> dict
     )
 
     candidate_text = ", ".join(candidate_characters[:80]) if candidate_characters else "(none)"
-    prompt = (
-        "你是检索查询分析器。请解析用户问题并输出严格 JSON。\n"
-        "字段要求：\n"
-        "- characters: 从候选角色中选择最相关角色名数组（最多8个）\n"
-        "- timeline_intent: one of [none, ordering, evolution, comparison, unknown]\n"
-        "- relation_intent: true/false（是否在问角色关系或互动）\n"
-        "- confidence: 0~1 浮点数\n"
-        "只返回 JSON，不要任何额外文字。\n\n"
-        f"用户问题:\n{query}\n\n"
-        f"候选角色列表:\n{candidate_text}\n"
+    prompt = render_prompt(
+        "agents.pg_knowledge.query_analysis",
+        query=query,
+        candidate_text=candidate_text,
     )
 
     if tracing_context is not None:
@@ -288,17 +283,11 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> tuple[lis
             f"text={preview}"
         )
 
-    prompt = (
-        "你是检索重排序器。请根据用户查询评估候选片段相关性，并返回最相关的结果。\n"
-        "要求：\n"
-        "1) 只返回 JSON，不要额外文字。\n"
-        "2) JSON 格式: [{\"id\": 1, \"score\": 0-100, \"reason\": \"...\"}]\n"
-        "3) score 越高表示与查询越相关，优先语义匹配、角色线索连续性、时间线一致性。\n"
-        "4) 仅返回最相关的前 N 条，其中 N="
-        f"{max(1, int(top_k))}。\n\n"
-        f"用户查询:\n{query}\n\n"
-        "候选片段:\n"
-        + "\n\n".join(candidates)
+    prompt = render_prompt(
+        "agents.pg_knowledge.rerank",
+        top_k=max(1, int(top_k)),
+        query=query,
+        candidates="\n\n".join(candidates),
     )
 
     if tracing_context is not None:

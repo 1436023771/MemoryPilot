@@ -32,7 +32,9 @@ from app.agents.langgraph_config import (
     context_window_default,
     rerank_candidates_default,
 )
+from app.agents.execution_config import docker_workdir_mount
 from app.core.config import Settings
+from app.core.prompt_store import render_prompt
 
 
 DEFAULT_MAX_HISTORY_TOKENS = 1800
@@ -412,23 +414,18 @@ def _build_prompt_node(state: QAState) -> QAState:
     memory_ctx = str(state.get("retrieved_context", "")).strip() or "(none)"
     knowledge_ctx = str(state.get("knowledge_context", "")).strip() or "(none)"
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    mount_path = docker_workdir_mount()
+    docker_workdir = str(mount_path) if mount_path is not None else "(未配置，将使用临时目录)"
 
     messages: list[StreamMessage] = []
 
-    prompt = (
-        "You are a concise and reliable reading companion assistant.\n"
-        f"Current local time: {now_local}\n\n"
-        "Task policy:\n"
-        "1) Prefer internal knowledge context when answering book/project questions.\n"
-        "2) If timeline is involved, list events in chronological order and mention uncertainty explicitly.\n"
-        "3) If evidence conflicts, present both versions and cite the chunk references from retrieval context.\n"
-        "4) Keep final answer within 3 bullet points.\n\n"
-        "User question:\n"
-        f"{question}\n\n"
-        "Retrieved memory context:\n"
-        f"{memory_ctx}\n\n"
-        "Retrieved knowledge context:\n"
-        f"{knowledge_ctx}\n"
+    prompt = render_prompt(
+        "agents.langgraph.final_user_prompt",
+        now_local=now_local,
+        question=question,
+        memory_ctx=memory_ctx,
+        knowledge_ctx=knowledge_ctx,
+        docker_workdir=docker_workdir,
     )
 
     history = state.get("history", [])

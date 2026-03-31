@@ -32,26 +32,13 @@ def record_python_exec(code: str, result: str) -> None:
 
 
 def _contains_dangerous_python(code: str) -> bool:
-    """Block obvious high-risk operations."""
+    """Block only clearly destructive patterns; allow normal sandbox operations."""
     deny_patterns = [
-        r"\bimport\s+subprocess\b",
-        r"\bfrom\s+subprocess\s+import\b",
-        r"\bos\.system\s*\(",
-        r"\bsubprocess\.",
         r"\bpty\.",
-        r"\bimport\s+socket\b",
-        r"\bfrom\s+socket\s+import\b",
-        r"\bsocket\.",
-        r"\bimport\s+requests\b",
-        r"\bfrom\s+requests\s+import\b",
-        r"\brequests\.",
-        r"\bimport\s+httpx\b",
-        r"\bfrom\s+httpx\s+import\b",
-        r"\bhttpx\.",
-        r"\burllib\.request\.",
-        r"\bimport\s+shutil\b",
-        r"\bfrom\s+shutil\s+import\b",
-        r"\bshutil\.rmtree\s*\(",
+        r"\bshutil\.rmtree\s*\(\s*[\"']\/(?:\s*[\"'])?",
+        r"\bos\.remove\s*\(\s*[\"']\/(?:\s*[\"'])?",
+        r"\bos\.rmdir\s*\(\s*[\"']\/(?:\s*[\"'])?",
+        r"\bpathlib\.path\s*\(\s*[\"']\/(?:\s*[\"'])?\s*\)\s*\.rmdir\s*\(",
     ]
     lowered = code.lower()
     return any(re.search(pattern, lowered) for pattern in deny_patterns)
@@ -72,7 +59,7 @@ def run_python_code(code: str) -> str:
         return result
 
     if _contains_dangerous_python(normalized):
-        result = "Python 执行失败: 检测到高风险调用（系统命令/网络/进程操作），已拒绝执行"
+        result = "Python 执行失败: 检测到危险破坏模式（如根目录删除/伪终端滥用），已拒绝执行"
         record_python_exec(normalized, result)
         return result
 

@@ -132,11 +132,21 @@ def _prepare_mount_dir() -> Path:
 
 @tool
 def run_docker_command(command: str, timeout_seconds: int = 30) -> str:
-    """Execute shell command inside Docker sandbox.
+    """在 Docker 沙箱中执行 shell 命令（高风险操作优先使用）。
 
     Args:
-        command: Shell command to execute in container.
-        timeout_seconds: Max run time in seconds.
+        command: 在容器内执行的命令，例如 `ls -la`、`find . -name '*.log'`、`curl -I https://example.com`。
+        timeout_seconds: 最大执行时长（秒）。
+
+    Returns:
+        统一格式的执行结果：exit_code/stdout/stderr。
+
+    Use when:
+        - 需要系统命令、文件批处理、下载、环境探测等操作。
+        - 不适合只用文本推理完成的问题。
+
+    Notes:
+        - 该工具受资源/安全限制；若沙箱未开启会返回明确错误。
     """
     normalized = (command or "").strip()
     if not docker_sandbox_enabled():

@@ -9,6 +9,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.core.prompt_store import render_prompt
 
 try:
     from langsmith import tracing_context
@@ -119,18 +120,7 @@ def _call_llm_for_analysis(content: str) -> dict[str, Any]:
         base_url=settings.base_url,
     )
 
-    prompt = (
-        "你是小说叙事结构抽取器。请基于文本提取结构化信息，并仅输出 JSON。\n"
-        "字段要求：\n"
-        "- narrative_context: one of [present, flashback, dream, reported]\n"
-        "- time_markers: 时间表达数组（最多16项）\n"
-        "- character_mentions: 角色名数组（最多20项）\n"
-        "- relationship_edges: 关系边数组（最多24项），元素格式"
-        " {\"source\":\"角色A\",\"target\":\"角色B\",\"relation\":\"关系\"}\n"
-        "不要输出任何额外文字。\n\n"
-        "文本内容:\n"
-        f"{content}\n"
-    )
+    prompt = render_prompt("knowledge.narrative.single", content=content)
 
     if tracing_context is not None:
         with tracing_context(enabled=False):
@@ -169,19 +159,7 @@ def _call_llm_for_batch_analysis(contents: list[str]) -> list[dict[str, Any]]:
     for i, content in enumerate(contents, 1):
         content_blocks.append(f"--- 文本段落 {i} ---\n{content}\n")
 
-    prompt = (
-        "你是小说叙事结构抽取器。请分析以下文本段落，对每段提取结构化信息。\n"
-        "返回一个 JSON 数组，每项按段落顺序对应。\n\n"
-        "字段要求（对每段）：\n"
-        "- narrative_context: one of [present, flashback, dream, reported]\n"
-        "- time_markers: 时间表达数组（最多16项）\n"
-        "- character_mentions: 角色名数组（最多20项）\n"
-        "- relationship_edges: 关系边数组（最多24项），元素格式"
-        " {\"source\":\"角色A\",\"target\":\"角色B\",\"relation\":\"关系\"}\n\n"
-        "文本内容:\n"
-        + "".join(content_blocks)
-        + "\n只输出 JSON 数组，不要任何其他文字。"
-    )
+    prompt = render_prompt("knowledge.narrative.batch", content_blocks="".join(content_blocks))
 
     if tracing_context is not None:
         with tracing_context(enabled=False):
@@ -231,19 +209,7 @@ async def _call_llm_for_batch_analysis_async(contents: list[str]) -> list[dict[s
     for i, content in enumerate(contents, 1):
         content_blocks.append(f"--- 文本段落 {i} ---\n{content}\n")
 
-    prompt = (
-        "你是小说叙事结构抽取器。请分析以下文本段落，对每段提取结构化信息。\n"
-        "返回一个 JSON 数组，每项按段落顺序对应。\n\n"
-        "字段要求（对每段）：\n"
-        "- narrative_context: one of [present, flashback, dream, reported]\n"
-        "- time_markers: 时间表达数组（最多16项）\n"
-        "- character_mentions: 角色名数组（最多20项）\n"
-        "- relationship_edges: 关系边数组（最多24项），元素格式"
-        " {\"source\":\"角色A\",\"target\":\"角色B\",\"relation\":\"关系\"}\n\n"
-        "文本内容:\n"
-        + "".join(content_blocks)
-        + "\n只输出 JSON 数组，不要任何其他文字。"
-    )
+    prompt = render_prompt("knowledge.narrative.batch", content_blocks="".join(content_blocks))
 
     if tracing_context is not None:
         with tracing_context(enabled=False):
