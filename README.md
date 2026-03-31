@@ -103,6 +103,24 @@ Notes:
 - New tool `run_docker_command` is available for shell/file/network operations in the container.
 - If `DOCKER_SANDBOX_ENABLED=false`, sandbox tools return an explicit error instead of running on host.
 
+MCP server (initial implementation, for future decoupling):
+
+```bash
+python -m app.mcp.docker_sandbox_server
+```
+
+This server exposes `run_docker_command` and `run_python_in_docker` over MCP, backed by the shared sandbox core in `app/sandbox/docker_runner.py`.
+
+To route agent docker tools through MCP instead of local direct execution:
+
+```env
+DOCKER_MCP_ENABLED=true
+DOCKER_MCP_COMMAND=python -m app.mcp.docker_sandbox_server
+DOCKER_MCP_TIMEOUT=30
+```
+
+When `DOCKER_MCP_ENABLED=true`, `run_docker_command` and `run_python_code` will call the MCP server path.
+
 4. Run the demo chain:
 
 ```bash

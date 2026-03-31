@@ -54,3 +54,16 @@ def docker_workdir_mount() -> Path | None:
 
 def docker_max_command_chars() -> int:
     return get_env_int("DOCKER_MAX_COMMAND_CHARS", default=4000, min_value=200)
+
+
+def docker_mcp_enabled() -> bool:
+    return get_env_bool("DOCKER_MCP_ENABLED", default=False)
+
+
+def docker_mcp_command() -> str:
+    raw = os.getenv("DOCKER_MCP_COMMAND", "python -m app.mcp.docker_sandbox_server").strip()
+    return raw or "python -m app.mcp.docker_sandbox_server"
+
+
+def docker_mcp_timeout_seconds() -> int:
+    return get_env_int("DOCKER_MCP_TIMEOUT", default=30, min_value=5)

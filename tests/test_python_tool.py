@@ -6,7 +6,7 @@ def test_run_python_code_success(monkeypatch) -> None:
     monkeypatch.setenv("DOCKER_SANDBOX_ENABLED", "true")
     monkeypatch.setattr(
         py_exec_module,
-        "run_python_in_docker",
+        "_run_python_in_docker_impl",
         lambda code: "exit_code: 0\nstdout:\n5\n\nstderr:\n(empty)",
     )
 
@@ -38,7 +38,7 @@ def test_run_python_code_allows_subprocess_in_sandbox(monkeypatch) -> None:
     monkeypatch.setenv("DOCKER_SANDBOX_ENABLED", "true")
     monkeypatch.setattr(
         py_exec_module,
-        "run_python_in_docker",
+        "_run_python_in_docker_impl",
         lambda code: "exit_code: 0\nstdout:\nsubprocess-ok\n\nstderr:\n(empty)",
     )
 
