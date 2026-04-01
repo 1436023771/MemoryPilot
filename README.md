@@ -84,6 +84,25 @@ MODEL_NAME=deepseek-chat
 TEMPERATURE=0.2
 ```
 
+Docker sandbox (optional, for high-risk operations in container):
+
+```env
+DOCKER_SANDBOX_ENABLED=true
+DOCKER_SANDBOX_IMAGE=python:3.11-slim
+DOCKER_EXEC_TIMEOUT=30
+DOCKER_MEMORY_LIMIT=512m
+DOCKER_CPU_LIMIT=1
+DOCKER_PIDS_LIMIT=128
+DOCKER_NETWORK_MODE=bridge
+# Optional persistent workspace mount
+DOCKER_SANDBOX_WORKDIR=~/agent_sandbox_workspace
+```
+
+Notes:
+- `run_python_code` now executes inside Docker sandbox and does not fall back to host execution.
+- New tool `run_docker_command` is available for shell/file/network operations in the container.
+- If `DOCKER_SANDBOX_ENABLED=false`, sandbox tools return an explicit error instead of running on host.
+
 4. Run the demo chain:
 
 ```bash
@@ -110,17 +129,7 @@ Start multi-turn interactive chat:
 python -m app.cli.main --interactive --session-id demo-chat
 ```
 
-Use LangGraph orchestrator for finer control:
-
-```bash
-python -m app.cli.main --interactive --orchestrator langgraph --session-id demo-graph
-```
-
-Or set default orchestrator in environment:
-
-```env
-AGENT_ORCHESTRATOR=langgraph
-```
+The conversation pipeline is LangGraph-only by default.
 
 Enable LangSmith tracing for LangGraph node-level monitoring:
 
@@ -173,6 +182,22 @@ PGVECTOR_PORT=5432
 PGVECTOR_DBNAME=agent_db
 PGVECTOR_USER=postgres
 PGVECTOR_PASSWORD=postgres
+
+# Optional knowledge pipeline tuning
+KNOWLEDGE_CHAPTER_ANALYSIS_CONCURRENCY=4
+KNOWLEDGE_SYNC_INCREMENTAL=true
+KNOWLEDGE_SYNC_AUTO_DELETE_REMOVED=true
+KNOWLEDGE_SYNC_HASH_CHECK=true
+KNOWLEDGE_SYNC_SHOW_INCREMENTAL_STATS=true
+KNOWLEDGE_SYNC_STATE_FILE=memory/bookshelf_sync_state.json
+KNOWLEDGE_TOP_K_DEFAULT=5
+KNOWLEDGE_CONTEXT_WINDOW_DEFAULT=3
+KNOWLEDGE_RERANK_CANDIDATES_DEFAULT=14
+KNOWLEDGE_LOCAL_RERANK_WEIGHT_SEMANTIC=0.5
+KNOWLEDGE_LOCAL_RERANK_WEIGHT_CHARACTER=0.35
+KNOWLEDGE_LOCAL_RERANK_WEIGHT_TIMELINE=0.15
+KNOWLEDGE_BLEND_WEIGHT_LLM=0.6
+KNOWLEDGE_BLEND_WEIGHT_LOCAL=0.4
 ```
 
 Then sync with one command:

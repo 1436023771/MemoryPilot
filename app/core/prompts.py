@@ -1,5 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from app.core.prompt_store import get_prompt_template
+
 
 # Prompt 结构：系统指令 + 历史消息 + 当前用户问题。
 DEFAULT_QA_PROMPT = ChatPromptTemplate.from_messages(
@@ -7,9 +9,7 @@ DEFAULT_QA_PROMPT = ChatPromptTemplate.from_messages(
         # 系统消息：定义输出风格和长度约束。
         (
             "system",
-            "You are a concise assistant. Answer clearly in 3 bullet points or fewer.\n"
-            "If retrieved long-term memory is provided, use it only when relevant.\n"
-            "Retrieved memory:\n{retrieved_context}",
+            get_prompt_template("core.default_qa_system"),
         ),
         # 历史占位：由 RunnableWithMessageHistory 在运行时注入。
         MessagesPlaceholder(variable_name="history"),

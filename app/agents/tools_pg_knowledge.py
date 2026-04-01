@@ -11,6 +11,16 @@ from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.core.prompt_store import render_prompt
+from app.agents.knowledge_config import (
+    pgvector_table,
+    pgvector_embedding_model,
+    local_rerank_weights,
+    blend_weights,
+    top_k_default,
+    context_window_default,
+    rerank_candidates_default,
+)
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import PgVectorKnowledgeStore
@@ -80,16 +90,10 @@ def _analyze_query_with_llm(query: str, candidate_characters: list[str]) -> dict
     )
 
     candidate_text = ", ".join(candidate_characters[:80]) if candidate_characters else "(none)"
-    prompt = (
-        "你是检索查询分析器。请解析用户问题并输出严格 JSON。\n"
-        "字段要求：\n"
-        "- characters: 从候选角色中选择最相关角色名数组（最多8个）\n"
-        "- timeline_intent: one of [none, ordering, evolution, comparison, unknown]\n"
-        "- relation_intent: true/false（是否在问角色关系或互动）\n"
-        "- confidence: 0~1 浮点数\n"
-        "只返回 JSON，不要任何额外文字。\n\n"
-        f"用户问题:\n{query}\n\n"
-        f"候选角色列表:\n{candidate_text}\n"
+    prompt = render_prompt(
+        "agents.pg_knowledge.query_analysis",
+        query=query,
+        candidate_text=candidate_text,
     )
 
     if tracing_context is not None:
@@ -164,6 +168,14 @@ def _to_str_list(value) -> list[str]:
     return []
 
 
+def _local_rerank_weights() -> tuple[float, float, float]:
+    return local_rerank_weights()
+
+
+def _blend_weights() -> tuple[float, float]:
+    return blend_weights()
+
+
 def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> tuple[list[dict], dict]:
     """Apply deterministic rerank with character continuity and timeline coherence."""
     if not hits:
@@ -190,6 +202,7 @@ def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> t
         anchor_chars = [name for name, _ in counter.most_common(3)]
 
     reranked: list[dict] = []
+    w_semantic, w_character, w_timeline = _local_rerank_weights()
     for hit in hits:
         chars = _to_str_list(hit.get("character_mentions", []))
         char_set = set(chars)
@@ -216,7 +229,7 @@ def _apply_role_timeline_rerank(hits: list[dict], analysis: dict[str, Any]) -> t
         # Semantic base from vector similarity score field.
         semantic = _normalize_score_0_1(float(hit.get("score", 0.0)), lower=0.0, upper=1.0)
 
-        local_score = 0.5 * semantic + 0.35 * character_score + 0.15 * timeline_score
+        local_score = w_semantic * semantic + w_character * character_score + w_timeline * timeline_score
 
         enriched = dict(hit)
         enriched["local_semantic_score"] = round(semantic * 100.0, 2)
@@ -270,17 +283,11 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> tuple[lis
             f"text={preview}"
         )
 
-    prompt = (
-        "你是检索重排序器。请根据用户查询评估候选片段相关性，并返回最相关的结果。\n"
-        "要求：\n"
-        "1) 只返回 JSON，不要额外文字。\n"
-        "2) JSON 格式: [{\"id\": 1, \"score\": 0-100, \"reason\": \"...\"}]\n"
-        "3) score 越高表示与查询越相关，优先语义匹配、角色线索连续性、时间线一致性。\n"
-        "4) 仅返回最相关的前 N 条，其中 N="
-        f"{max(1, int(top_k))}。\n\n"
-        f"用户查询:\n{query}\n\n"
-        "候选片段:\n"
-        + "\n\n".join(candidates)
+    prompt = render_prompt(
+        "agents.pg_knowledge.rerank",
+        top_k=max(1, int(top_k)),
+        query=query,
+        candidates="\n\n".join(candidates),
     )
 
     if tracing_context is not None:
@@ -408,11 +415,11 @@ def _format_hits(store: PgVectorKnowledgeStore, hits: list[dict], max_items: int
 @tool
 def retrieve_pg_knowledge(
     query: str,
-    top_k: int = 5,
+    top_k: int = 0,
     book_id: str = "",
     chapter: str = "",
-    context_window: int = 2,
-    rerank_candidates: int = 12,
+    context_window: int = -1,
+    rerank_candidates: int = 0,
 ) -> str:
     """Retrieve relevant chunks from PostgreSQL + pgvector knowledge base.
 
@@ -421,11 +428,13 @@ def retrieve_pg_knowledge(
 
     Args:
         query: Search query text.
-        top_k: Number of chunks to return.
+        top_k: Number of chunks to return. <=0 时读取环境变量 KNOWLEDGE_TOP_K_DEFAULT。
         book_id: Optional exact filter of book_id.
         chapter: Optional exact filter of chapter.
         context_window: Neighbor chunk window for returning longer context around a hit.
+            <0 时读取环境变量 KNOWLEDGE_CONTEXT_WINDOW_DEFAULT。
         rerank_candidates: Candidate pool size for LLM relevance reranking before final output.
+            <=0 时读取环境变量 KNOWLEDGE_RERANK_CANDIDATES_DEFAULT。
     """
     clean_query = (query or "").strip()
     if not clean_query:
@@ -439,11 +448,8 @@ def retrieve_pg_knowledge(
         record_knowledge_retrieval(clean_query, result)
         return result
 
-    table = os.getenv("PGVECTOR_TABLE", "knowledge_chunks").strip() or "knowledge_chunks"
-    embedding_model = os.getenv(
-        "PGVECTOR_EMBEDDING_MODEL",
-        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    ).strip()
+    table = pgvector_table()
+    embedding_model = pgvector_embedding_model()
 
     try:
         query_vecs, dim = embed_texts_sentence_transformers([clean_query], model_name=embedding_model)
@@ -465,9 +471,21 @@ def retrieve_pg_knowledge(
             book_id=clean_book_id,
             candidate_characters=character_candidates,
         )
+        effective_top_k = int(top_k)
+        if effective_top_k <= 0:
+            effective_top_k = top_k_default()
+
+        effective_context_window = int(context_window)
+        if effective_context_window < 0:
+            effective_context_window = context_window_default()
+
+        effective_rerank_candidates = int(rerank_candidates)
+        if effective_rerank_candidates <= 0:
+            effective_rerank_candidates = rerank_candidates_default()
+
         hits = store.similarity_search(
             query_embedding=query_vecs[0],
-            top_k=max(max(1, int(top_k)), max(2, int(rerank_candidates))),
+            top_k=max(effective_top_k, effective_rerank_candidates),
             book_id=clean_book_id,
             chapter=clean_chapter,
         )
@@ -480,26 +498,27 @@ def retrieve_pg_knowledge(
         # Step 1: deterministic local rerank (character continuity + timeline coherence).
         locally_reranked, local_aux = _apply_role_timeline_rerank(hits, query_analysis)
 
-        reranked_hits = locally_reranked[: max(1, int(top_k))]
+        reranked_hits = locally_reranked[:effective_top_k]
         rerank_aux: dict = {}
         try:
             llm_reranked_hits, rerank_aux = _rerank_hits_with_llm(
                 query=clean_query,
                 hits=locally_reranked,
-                top_k=max(1, int(top_k)),
+                top_k=effective_top_k,
             )
             # Blend LLM and local signals to avoid losing deterministic continuity constraints.
+            w_llm, w_local = _blend_weights()
             blended: list[dict] = []
             for hit in llm_reranked_hits:
                 llm_score = float(hit.get("rerank_score", 0.0) or 0.0)
                 local_score = float(hit.get("local_rerank_score", 0.0) or 0.0)
                 hit2 = dict(hit)
-                hit2["blended_rerank_score"] = round(0.6 * llm_score + 0.4 * local_score, 2)
+                hit2["blended_rerank_score"] = round(w_llm * llm_score + w_local * local_score, 2)
                 blended.append(hit2)
             blended.sort(key=lambda h: float(h.get("blended_rerank_score", 0.0)), reverse=True)
-            reranked_hits = blended[: max(1, int(top_k))]
+            reranked_hits = blended[:effective_top_k]
         except Exception as exc:  # noqa: BLE001
-            reranked_hits = locally_reranked[: max(1, int(top_k))]
+            reranked_hits = locally_reranked[:effective_top_k]
             rerank_aux = {
                 "rerank_prompt": "",
                 "rerank_response": "",
@@ -510,8 +529,8 @@ def retrieve_pg_knowledge(
         body = _format_hits(
             store=store,
             hits=reranked_hits,
-            max_items=max(1, int(top_k)),
-            context_window=max(0, int(context_window)),
+            max_items=effective_top_k,
+            context_window=max(0, effective_context_window),
         )
         result = f"知识库检索结果:\n{body}"
         auxiliary = {

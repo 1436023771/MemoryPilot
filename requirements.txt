@@ -14,3 +14,4 @@ pypdf>=5.0.0
 ebooklib>=0.18
 beautifulsoup4>=4.12.0
 ddgs>=0.1.0
+PyYAML>=6.0.0

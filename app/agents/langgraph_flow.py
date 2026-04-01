@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import os
+import re
 from typing import Callable
 from typing import Annotated
 from typing import TypedDict
@@ -12,6 +13,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.messages import AIMessageChunk
 from langchain_core.messages import BaseMessage
 from langchain_core.messages import HumanMessage
+from langchain_core.messages import SystemMessage
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -20,9 +22,22 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
 
-from app.agents.tools import retrieve_pg_knowledge, run_python_code, web_search
+from app.agents.tools import retrieve_pg_knowledge, run_docker_command, run_python_code, web_search
 from app.agents.stream_messages import StreamMessage, MessageType
+from app.agents.langgraph_config import (
+    langchain_project,
+    max_history_tokens,
+    DEFAULT_MAX_HISTORY_TOKENS,
+    top_k_default,
+    context_window_default,
+    rerank_candidates_default,
+)
+from app.agents.execution_config import docker_workdir_mount
 from app.core.config import Settings
+from app.core.prompt_store import render_prompt
+
+
+DEFAULT_MAX_HISTORY_TOKENS = 1800
 
 
 def _add_stream_messages(left: list[StreamMessage], right: list[StreamMessage]) -> list[StreamMessage]:
@@ -58,7 +73,7 @@ def _node_config(name: str, extra_tags: list[str] | None = None) -> dict:
 
 
 def _graph_config() -> dict:
-    project = os.getenv("LANGCHAIN_PROJECT", "agent-langgraph")
+    project = langchain_project()
     return {
         "run_name": "langgraph_qa_chain",
         "tags": ["langgraph", "qa-flow"],
@@ -90,6 +105,274 @@ def _detect_route(question: str) -> str:
     return "direct"
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """Rough token estimate without external tokenizer dependency."""
+    raw = str(text or "")
+    if not raw:
+        return 0
+
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", raw))
+    latin_words = re.findall(r"[a-zA-Z0-9_]+", raw)
+    latin_chars = sum(len(w) for w in latin_words)
+    symbol_chars = len(re.findall(r"[^\w\s\u4e00-\u9fff]", raw))
+    latin_tokens = max(1, latin_chars // 4) if latin_chars > 0 else 0
+
+    # CJK roughly maps close to one token per character; latin text is denser.
+    return cjk_count + latin_tokens + max(0, symbol_chars // 6)
+
+
+def _estimate_message_tokens(msg: BaseMessage) -> int:
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return _estimate_text_tokens(content)
+    if isinstance(content, list):
+        joined = " ".join(str(item) for item in content)
+        return _estimate_text_tokens(joined)
+    return _estimate_text_tokens(str(content))
+
+
+def _history_token_limit() -> int:
+    return max(300, max_history_tokens())
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = [p.strip() for p in re.split(r"(?<=[。！？!?；;\.\n])\s*", text or "") if p and p.strip()]
+    return parts
+
+
+def _extract_key_tokens(text: str) -> list[str]:
+    """Extract key tokens that should be preserved across compression."""
+    raw = str(text or "")
+    if not raw:
+        return []
+
+    patterns = [
+        r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b",  # date-like 2026-03-28
+        r"\b\d{1,2}:\d{2}\b",  # time-like 08:30
+        r"\b\d+(?:\.\d+)?%\b",  # percentage
+        r"\b\d+(?:\.\d+)?(?:k|m|b|w)?\b",  # numbers
+        r"\b(?:v|V)?\d+(?:\.\d+){1,3}\b",  # version-like
+        r"\b[a-zA-Z_]+\s*=\s*[^\s,;，；]+",  # key=value hints
+    ]
+
+    negation_terms = ["不", "不能", "不要", "不可", "仅", "必须", "except", "unless", "not", "only"]
+
+    seen: set[str] = set()
+    kept: list[str] = []
+    for pat in patterns:
+        for m in re.finditer(pat, raw):
+            token = m.group(0).strip()
+            if token and token not in seen:
+                seen.add(token)
+                kept.append(token)
+
+    for word in negation_terms:
+        if word in raw and word not in seen:
+            seen.add(word)
+            kept.append(word)
+
+    return kept[:12]
+
+
+def _contains_key_token(text: str, token: str) -> bool:
+    if not token:
+        return False
+    return token in (text or "")
+
+
+def _compress_text_head_tail_to_token_budget(text: str, max_tokens: int) -> str:
+    """Fallback head-tail compression with hard budget guarantee."""
+    raw = str(text or "")
+    if not raw:
+        return raw
+    if max_tokens <= 0:
+        return ""
+
+    estimated = _estimate_text_tokens(raw)
+    if estimated <= max_tokens:
+        return raw
+
+    keep_ratio = max(0.08, min(1.0, max_tokens / max(estimated, 1)))
+    keep_chars = max(6, int(len(raw) * keep_ratio * 0.95))
+    if keep_chars >= len(raw):
+        candidate = raw
+    elif keep_chars <= 12:
+        candidate = raw[:keep_chars].rstrip()
+    else:
+        head_len = int(keep_chars * 0.7)
+        tail_len = max(0, keep_chars - head_len)
+        head = raw[:head_len].rstrip()
+        tail = raw[-tail_len:].lstrip() if tail_len > 0 else ""
+        candidate = f"{head} ... {tail}" if tail else head
+
+    if _estimate_text_tokens(candidate) <= max_tokens:
+        return candidate
+
+    # Hard fallback: shrink aggressively until budget is satisfied.
+    hard_chars = min(len(raw), max_tokens)
+    hard = raw[: max(1, hard_chars)].rstrip()
+    while hard and _estimate_text_tokens(hard) > max_tokens:
+        next_len = max(1, len(hard) - 1)
+        hard = hard[:next_len].rstrip()
+        if next_len == 1:
+            break
+    return hard
+
+
+def _extractive_compress_with_keys(text: str, max_tokens: int, key_tokens: list[str]) -> str:
+    """Extractive sentence compression with key-token-aware scoring."""
+    sentences = _split_sentences(text)
+    if not sentences:
+        return _compress_text_head_tail_to_token_budget(text, max_tokens)
+
+    scored: list[tuple[float, int, str, int]] = []
+    for idx, sent in enumerate(sentences):
+        sent_tokens = _estimate_text_tokens(sent)
+        if sent_tokens <= 0:
+            continue
+        key_hits = sum(1 for k in key_tokens if _contains_key_token(sent, k))
+        has_digit = 1.0 if re.search(r"\d", sent) else 0.0
+        has_negation = 1.0 if any(x in sent for x in ("不", "不能", "不要", "不可", "仅", "必须", "not", "only")) else 0.0
+        density = min(1.0, sent_tokens / 24)
+        score = key_hits * 3.0 + has_digit * 0.8 + has_negation * 1.0 + density * 0.4
+        scored.append((score, idx, sent, sent_tokens))
+
+    if not scored:
+        return _compress_text_head_tail_to_token_budget(text, max_tokens)
+
+    scored.sort(key=lambda x: (x[0], -x[3]), reverse=True)
+
+    selected_idx: set[int] = set()
+    used = 0
+    for _score, idx, sent, sent_tokens in scored:
+        if sent_tokens > max_tokens:
+            continue
+        if used + sent_tokens > max_tokens:
+            continue
+        selected_idx.add(idx)
+        used += sent_tokens
+        if used >= int(max_tokens * 0.9):
+            break
+
+    if not selected_idx:
+        best = scored[0][2]
+        return _compress_text_head_tail_to_token_budget(best, max_tokens)
+
+    ordered = [sentences[i] for i in sorted(selected_idx)]
+    candidate = " ".join(ordered).strip()
+    if _estimate_text_tokens(candidate) <= max_tokens:
+        return candidate
+    return _compress_text_head_tail_to_token_budget(candidate, max_tokens)
+
+
+def _inject_missing_key_tokens(base: str, key_tokens: list[str], max_tokens: int) -> str:
+    """Try appending missing key tokens while staying under budget."""
+    result = base.strip()
+    for token in key_tokens:
+        if _contains_key_token(result, token):
+            continue
+        trial = f"{result} [{token}]" if result else token
+        if _estimate_text_tokens(trial) <= max_tokens:
+            result = trial
+    return result
+
+
+def _compress_text_to_token_budget(text: str, max_tokens: int) -> str:
+    """Hybrid compression: key-token preservation + local extractive summarization."""
+    raw = str(text or "")
+    if not raw:
+        return raw
+    if max_tokens <= 0:
+        return ""
+
+    estimated = _estimate_text_tokens(raw)
+    if estimated <= max_tokens:
+        return raw
+
+    key_tokens = _extract_key_tokens(raw)
+    extracted = _extractive_compress_with_keys(raw, max_tokens, key_tokens)
+    with_keys = _inject_missing_key_tokens(extracted, key_tokens, max_tokens)
+
+    if _estimate_text_tokens(with_keys) <= max_tokens:
+        return with_keys
+
+    return _compress_text_head_tail_to_token_budget(with_keys, max_tokens)
+
+
+def _copy_message_with_content(msg: BaseMessage, content: str) -> BaseMessage:
+    """Clone message while preserving role-specific metadata."""
+    if isinstance(msg, HumanMessage):
+        return HumanMessage(content=content, additional_kwargs=getattr(msg, "additional_kwargs", {}))
+    if isinstance(msg, AIMessage):
+        return AIMessage(content=content, additional_kwargs=getattr(msg, "additional_kwargs", {}))
+    if isinstance(msg, SystemMessage):
+        return SystemMessage(content=content, additional_kwargs=getattr(msg, "additional_kwargs", {}))
+    if isinstance(msg, ToolMessage):
+        return ToolMessage(
+            content=content,
+            tool_call_id=str(getattr(msg, "tool_call_id", "") or ""),
+            additional_kwargs=getattr(msg, "additional_kwargs", {}),
+        )
+
+    try:
+        return msg.__class__(content=content)
+    except Exception:  # noqa: BLE001
+        return HumanMessage(content=content)
+
+
+def _compress_history_by_token_budget(history: list[BaseMessage], max_tokens: int) -> list[BaseMessage]:
+    """Compress message contents to fit budget while keeping all message turns."""
+    if not history:
+        return []
+    if max_tokens <= 0:
+        return [_copy_message_with_content(msg, "") for msg in history]
+
+    costs = [_estimate_message_tokens(msg) for msg in history]
+    total = sum(costs)
+    if total <= max_tokens:
+        return history
+
+    n = len(history)
+    # Keep at least one estimated token budget per message to preserve turns.
+    minima = [1] * n
+    budget_left = max(0, max_tokens - sum(minima))
+    capacities = [max(0, c - 1) for c in costs]
+
+    # Prefer recent messages by assigning larger weights to later indices.
+    weights = [i + 1 for i in range(n)]
+    weight_sum = sum(weights) or 1
+    extras = [0] * n
+
+    for i in range(n):
+        if capacities[i] <= 0 or budget_left <= 0:
+            continue
+        alloc = int(budget_left * (weights[i] / weight_sum))
+        use = min(capacities[i], alloc)
+        extras[i] = use
+
+    used_extra = sum(extras)
+    remaining = max(0, budget_left - used_extra)
+    for i in range(n - 1, -1, -1):
+        if remaining <= 0:
+            break
+        spare = capacities[i] - extras[i]
+        if spare <= 0:
+            continue
+        take = min(spare, remaining)
+        extras[i] += take
+        remaining -= take
+
+    targets = [minima[i] + extras[i] for i in range(n)]
+    compressed: list[BaseMessage] = []
+    for msg, target in zip(history, targets, strict=False):
+        content = getattr(msg, "content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        new_content = _compress_text_to_token_budget(content, target)
+        compressed.append(_copy_message_with_content(msg, new_content))
+    return compressed
+
+
 def _plan_node(state: QAState) -> QAState:
     question = str(state.get("question", "")).strip()
     route = _detect_route(question)
@@ -107,13 +390,16 @@ def _knowledge_node(state: QAState) -> QAState:
 
     messages = [StreamMessage.progress("正在检索知识库...")]
     try:
+        default_top_k = top_k_default()
+        default_context_window = context_window_default()
+        default_rerank_candidates = rerank_candidates_default()
         # 先做召回+重排，再把结果回传给回答节点。
         retrieved = retrieve_pg_knowledge.invoke(
             {
                 "query": question,
-                "top_k": 5,
-                "context_window": 3,
-                "rerank_candidates": 14,
+                "top_k": default_top_k,
+                "context_window": default_context_window,
+                "rerank_candidates": default_rerank_candidates,
             }
         )
         messages.append(StreamMessage.progress("知识库检索完成"))
@@ -128,29 +414,26 @@ def _build_prompt_node(state: QAState) -> QAState:
     memory_ctx = str(state.get("retrieved_context", "")).strip() or "(none)"
     knowledge_ctx = str(state.get("knowledge_context", "")).strip() or "(none)"
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    mount_path = docker_workdir_mount()
+    docker_workdir = str(mount_path) if mount_path is not None else "(未配置，将使用临时目录)"
 
     messages: list[StreamMessage] = []
 
-    prompt = (
-        "You are a concise and reliable reading companion assistant.\n"
-        f"Current local time: {now_local}\n\n"
-        "Task policy:\n"
-        "1) Prefer internal knowledge context when answering book/project questions.\n"
-        "2) If timeline is involved, list events in chronological order and mention uncertainty explicitly.\n"
-        "3) If evidence conflicts, present both versions and cite the chunk references from retrieval context.\n"
-        "4) Keep final answer within 3 bullet points.\n\n"
-        "User question:\n"
-        f"{question}\n\n"
-        "Retrieved memory context:\n"
-        f"{memory_ctx}\n\n"
-        "Retrieved knowledge context:\n"
-        f"{knowledge_ctx}\n"
+    prompt = render_prompt(
+        "agents.langgraph.final_user_prompt",
+        now_local=now_local,
+        question=question,
+        memory_ctx=memory_ctx,
+        knowledge_ctx=knowledge_ctx,
+        docker_workdir=docker_workdir,
     )
 
     history = state.get("history", [])
     chat_messages: list[BaseMessage] = []
     if isinstance(history, list):
-        chat_messages.extend(m for m in history if isinstance(m, BaseMessage))
+        history_msgs = [m for m in history if isinstance(m, BaseMessage)]
+        compressed_history = _compress_history_by_token_budget(history_msgs, _history_token_limit())
+        chat_messages.extend(compressed_history)
     chat_messages.append(HumanMessage(content=prompt))
 
     return {"final_prompt": prompt, "messages": chat_messages, "stream_messages": messages}
@@ -159,6 +442,7 @@ def _build_prompt_node(state: QAState) -> QAState:
 def _tool_display_name(tool_name: str) -> str:
     mapping = {
         "run_python_code": "Python计算器",
+        "run_docker_command": "Docker沙箱",
         "web_search": "联网搜索",
         "retrieve_pg_knowledge": "知识库检索",
     }
@@ -279,7 +563,7 @@ def build_langgraph_chain(
         base_url=settings.base_url,
     )
 
-    model_with_tools = model.bind_tools([web_search, retrieve_pg_knowledge, run_python_code])
+    model_with_tools = model.bind_tools([web_search, retrieve_pg_knowledge, run_python_code, run_docker_command])
 
     graph = StateGraph(QAState)
     graph.add_node("plan", RunnableLambda(_plan_node).with_config(_node_config("plan")))
@@ -294,7 +578,7 @@ def build_langgraph_chain(
     )
     graph.add_node(
         "tools",
-        ToolNode([web_search, retrieve_pg_knowledge, run_python_code]).with_config(
+        ToolNode([web_search, retrieve_pg_knowledge, run_python_code, run_docker_command]).with_config(
             _node_config("tools", ["tool-calls"])
         ),
     )
@@ -383,12 +667,27 @@ class StreamingLanggraphChain:
             config = kwargs["config"]
             if isinstance(config, dict) and "configurable" in config:
                 session_id = config["configurable"].get("session_id")
+
+        session_history = None
+        history_messages: list[BaseMessage] = []
+        if session_id:
+            try:
+                session_history = self._session_history_getter(session_id)
+                existing = getattr(session_history, "messages", [])
+                if isinstance(existing, list):
+                    history_messages.extend(m for m in existing if isinstance(m, BaseMessage))
+            except Exception:  # noqa: BLE001
+                session_history = None
+
+        provided_history = input_data.get("history", [])
+        if isinstance(provided_history, list):
+            history_messages.extend(m for m in provided_history if isinstance(m, BaseMessage))
         
         # 准备输入状态
         state_input = {
             "question": str(input_data.get("question", "")),
             "retrieved_context": str(input_data.get("retrieved_context", "")),
-            "history": input_data.get("history", []),
+            "history": history_messages,
             "stream_messages": [],
         }
         
@@ -399,6 +698,7 @@ class StreamingLanggraphChain:
         seen_tool_message_ids: set[str] = set()
         tool_name_by_call_id: dict[str, str] = {}
         saw_token_delta = False
+        answer_chunks: list[str] = []
 
         def _msg_fp(msg: StreamMessage) -> tuple[str, str, tuple[tuple[str, str], ...]]:
             meta_pairs = tuple(sorted((str(k), str(v)) for k, v in msg.metadata.items()))
@@ -522,6 +822,7 @@ class StreamingLanggraphChain:
                     if not delta_text:
                         continue
                     saw_token_delta = True
+                    answer_chunks.append(delta_text)
                     delta_msg = StreamMessage.final_answer(delta_text, is_delta=True)
                     collected_messages.append(delta_msg)
                     yield delta_msg
@@ -548,10 +849,31 @@ class StreamingLanggraphChain:
                 if not delta_text:
                     continue
                 saw_token_delta = True
+                answer_chunks.append(delta_text)
                 delta_msg = StreamMessage.final_answer(delta_text, is_delta=True)
                 collected_messages.append(delta_msg)
                 yield delta_msg
         
+        final_answer_text = ""
+        if saw_token_delta:
+            final_answer_text = "".join(answer_chunks)
+        elif final_state and "answer" in final_state:
+            final_answer_text = str(final_state.get("answer", "") or "")
+
+        # stream模式不会经过RunnableWithMessageHistory，需手动回写短期会话历史。
+        if session_history is not None:
+            try:
+                question = str(input_data.get("question", "")).strip()
+                to_add: list[BaseMessage] = []
+                if question:
+                    to_add.append(HumanMessage(content=question))
+                if final_answer_text.strip():
+                    to_add.append(AIMessage(content=final_answer_text))
+                if to_add:
+                    session_history.add_messages(to_add)
+            except Exception:  # noqa: BLE001
+                pass
+
         # 确保至少返回一个最终答案消息
         if final_state and "answer" in final_state and not saw_token_delta:
             answer = final_state.get("answer", "")

@@ -7,6 +7,7 @@ from typing import Callable
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.core.prompt_store import render_prompt
 
 try:
     from langsmith import tracing_context
@@ -68,35 +69,7 @@ def extract_candidate_facts_single_turn(
             base_url=settings.base_url,
         )
 
-        prompt = f"""你是记忆提取助手。分析用户输入，提取【只有用户本人才能提供的个人信息】。
-
-用户输入：
-{user_text}
-
-关键指示：
-1) 【只】提取用户关于自己的信息。例如：姓名、目标、偏好、厌恶、拥有的技能、个人背景
-2) 【严格拒绝】提取任何知识性内容、问题答案、通用建议、解释说明之类的内容
-3) 判断标准："这句话是不是用户在描述自己的某个属性或信息？"如果答案是"是"才提取
-4) 情景：如果用户提到第三方信息，记为"message"类型
-5) 如果一句话既包含用户信息也包含其他内容，只提取用户信息部分
-
-信息类别：
-- name: 用户的姓名
-- goal: 用户的长期目标或计划
-- like: 用户喜欢的事物或风格
-- dislike: 用户厌恶或不喜欢的事物
-- skill: 用户具备的技能或能力
-- background: 用户的背景信息
-- preference: 用户对交互方式的偏好
-- message: 关于他人或其他信息
-
-返回 JSON 数组，格式示例：
-[
-  {{"key": "name", "value": "小李", "importance": 10}},
-  {{"key": "goal", "value": "学习深度学习", "importance": 9}}
-]
-
-没有符合条件的信息时返回 []"""
+        prompt = render_prompt("memory.single_turn_extraction", user_text=user_text)
 
         if tracing_context is not None:
             with tracing_context(enabled=False):

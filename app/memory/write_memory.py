@@ -9,6 +9,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
+from app.core.prompt_store import render_prompt
 from app.memory.fallback import extract_candidate_facts_single_turn, extract_structured_facts_regex
 
 try:
@@ -123,26 +124,7 @@ def extract_candidate_facts_from_dialogue(messages: list[Any], max_turns: int = 
             base_url=settings.base_url,
         )
 
-        prompt = f"""你是长期记忆提取助手。下面是最近多轮对话，你的任务是从用户说出的话中提取关于【用户本人】的重要信息。
-
-对话历史：
-{dialogue_text}
-
-提取规则（很重要！）：
-1) 【只】从"用户:"部分提取用户本人的信息，不要从"助手:"提取。
-2) 提取的必须是关于用户本身的事实：姓名、长期目标、个人偏好、特殊厌恶、拥有的技能、背景信息
-3) 严格忽略助手提供的知识、检索结果、推荐、建议等【非用户信息】
-4) 严格忽略一次性、临时性内容（如"这次请求"、"当前问题"、"现在的时间"等）
-5) 严格忽略寒暄、重复确认、感谢等社交语言
-6) 如果用户提到了关于第三方的信息，记为"message"类型
-7) 遇到矛盾时，优先使用用户最新、最明确的表述
-
-判断标准：信息必须满足"这是用户本人说出的关于自己的事实"，否则不提取。
-
-请仅返回 JSON 数组，每个元素格式：
-{{"key": "name|goal|like|dislike|skill|background|preference|message", "value": "...", "importance": 1-10}}
-
-没有可保存信息时返回 []。不要输出任何额外文本。"""
+        prompt = render_prompt("memory.dialogue_extraction", dialogue_text=dialogue_text)
 
         if tracing_context is not None:
             with tracing_context(enabled=False):

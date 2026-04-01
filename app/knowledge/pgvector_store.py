@@ -186,6 +186,31 @@ class PgVectorKnowledgeStore:
                 cur.execute(f"TRUNCATE TABLE {self.table_name};")
             conn.commit()
 
+    def delete_by_document_id(self, document_id: str) -> int:
+        clean = (document_id or "").strip()
+        if not clean:
+            return 0
+        sql = f"DELETE FROM {self.table_name} WHERE document_id = %s;"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [clean])
+                deleted = int(getattr(cur, "rowcount", 0) or 0)
+            conn.commit()
+        return deleted
+
+    def count_by_document_id(self, document_id: str) -> int:
+        clean = (document_id or "").strip()
+        if not clean:
+            return 0
+        sql = f"SELECT COUNT(*) FROM {self.table_name} WHERE document_id = %s;"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, [clean])
+                row = cur.fetchone()
+        if not row:
+            return 0
+        return int(row[0] or 0)
+
     def upsert_chunks(self, chunks: list[KnowledgeChunk], embeddings: list[list[float]]) -> int:
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings must have same length")
