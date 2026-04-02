@@ -328,6 +328,18 @@ def _copy_message_with_content(msg: BaseMessage, content: str) -> BaseMessage:
         return HumanMessage(content=content)
 
 
+def _message_role_name(msg: BaseMessage) -> str:
+    if isinstance(msg, HumanMessage):
+        return "user"
+    if isinstance(msg, AIMessage):
+        return "assistant"
+    if isinstance(msg, SystemMessage):
+        return "system"
+    if isinstance(msg, ToolMessage):
+        return "tool"
+    return "user"
+
+
 def _compress_history_by_token_budget(history: list[BaseMessage], max_tokens: int) -> list[BaseMessage]:
     """Compress message contents to fit budget while keeping all message turns."""
     if not history:
@@ -338,15 +350,7 @@ def _compress_history_by_token_budget(history: list[BaseMessage], max_tokens: in
     if llmlingua_mcp_enabled():
         role_payload: list[dict[str, str]] = []
         for msg in history:
-            role = "user"
-            if isinstance(msg, HumanMessage):
-                role = "user"
-            elif isinstance(msg, AIMessage):
-                role = "assistant"
-            elif isinstance(msg, SystemMessage):
-                role = "system"
-            elif isinstance(msg, ToolMessage):
-                role = "tool"
+            role = _message_role_name(msg)
 
             content = getattr(msg, "content", "")
             if not isinstance(content, str):
@@ -354,6 +358,17 @@ def _compress_history_by_token_budget(history: list[BaseMessage], max_tokens: in
             role_payload.append({"role": role, "content": content})
 
         compressed_payload = compress_history_via_llmlingua_mcp(role_payload, int(max_tokens))
+        if isinstance(compressed_payload, list) and len(compressed_payload) == len(history):
+            roles_match = True
+            for msg, payload in zip(history, compressed_payload, strict=False):
+                payload_role = str(payload.get("role", "") or "")
+                if payload_role != _message_role_name(msg):
+                    roles_match = False
+                    break
+
+            if not roles_match:
+                compressed_payload = None
+
         if isinstance(compressed_payload, list) and len(compressed_payload) == len(history):
             compressed_msgs: list[BaseMessage] = []
             for msg, payload in zip(history, compressed_payload, strict=False):
@@ -453,7 +468,10 @@ def _build_prompt_node(state: QAState) -> QAState:
     knowledge_ctx = str(state.get("knowledge_context", "")).strip() or "(none)"
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     mount_path = docker_workdir_mount()
-    docker_workdir = str(mount_path) if mount_path is not None else "(未配置，将使用临时目录)"
+    # Docker container side workdir is always /workspace; host path is only a mount source detail.
+    docker_workdir = "/workspace"
+    if mount_path is not None:
+        docker_workdir = f"/workspace (host mount: {mount_path})"
 
     messages: list[StreamMessage] = []
 

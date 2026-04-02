@@ -326,8 +326,26 @@ if FastMCP is not None:
 
     @mcp.tool()
     def compress_history(messages: list[dict[str, Any]], target_tokens: int) -> dict[str, Any]:
-        data = reorder_context(messages=messages, target_tokens=target_tokens)
-        return {"compressed_messages": data.get("reordered_messages", [])}
+        normalized: list[dict[str, str]] = []
+        for item in messages or []:
+            role = str((item or {}).get("role", "user") or "user")
+            content = str((item or {}).get("content", "") or "")
+            normalized.append({"role": role, "content": content})
+
+        costs = [_token_count(item["content"]) for item in normalized]
+        allocations = _allocate_tokens(costs, int(target_tokens))
+
+        out: list[dict[str, str]] = []
+        for item, budget in zip(normalized, allocations, strict=False):
+            content = _compress_with_llmlingua(item["content"], int(budget), [])
+            out.append({"role": item["role"], "content": content})
+
+        return {
+            "compressed_messages": out,
+            "token_allocation": allocations,
+            "total_before": sum(costs),
+            "total_after": sum(_token_count(x["content"]) for x in out),
+        }
 
 
 def main() -> None:

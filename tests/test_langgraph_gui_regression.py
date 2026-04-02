@@ -40,7 +40,6 @@ def test_finalize_handles_empty_messages() -> None:
     # 应该有一个ERROR消息
     assert any(msg.message_type.value == "error" for msg in result["stream_messages"])
 
-
 def test_stream_mode_persists_session_history() -> None:
     """测试langgraph stream模式会写入短期会话历史。"""
 
@@ -82,8 +81,9 @@ def test_stream_mode_persists_session_history() -> None:
     assert "这是最终答案" in str(history.messages[1].content)
 
 
-def test_compress_history_by_token_budget_keeps_all_turns() -> None:
+def test_compress_history_by_token_budget_keeps_all_turns(monkeypatch) -> None:
     """测试历史压缩保留所有轮次消息结构。"""
+    monkeypatch.setattr("app.agents.langgraph_flow.llmlingua_mcp_enabled", lambda: False)
     history = [
         HumanMessage(content="这是第一轮问题，比较长比较长比较长比较长"),
         AIMessage(content="这是第一轮回答，比较长比较长比较长比较长"),
@@ -101,8 +101,9 @@ def test_compress_history_by_token_budget_keeps_all_turns() -> None:
     assert after_total <= before_total
 
 
-def test_compress_history_by_token_budget_prioritizes_recent_content() -> None:
+def test_compress_history_by_token_budget_prioritizes_recent_content(monkeypatch) -> None:
     """测试预算紧张时最近消息保留信息更多。"""
+    monkeypatch.setattr("app.agents.langgraph_flow.llmlingua_mcp_enabled", lambda: False)
     history = [
         HumanMessage(content="第一轮问题：" + "A" * 120),
         AIMessage(content="第一轮回答：" + "B" * 120),
@@ -117,8 +118,9 @@ def test_compress_history_by_token_budget_prioritizes_recent_content() -> None:
     assert last_len >= first_len
 
 
-def test_compress_history_by_token_budget_no_change_when_budget_large() -> None:
+def test_compress_history_by_token_budget_no_change_when_budget_large(monkeypatch) -> None:
     """测试预算充足时不压缩。"""
+    monkeypatch.setattr("app.agents.langgraph_flow.llmlingua_mcp_enabled", lambda: False)
     history = [
         HumanMessage(content="hello"),
         AIMessage(content="world"),
@@ -128,6 +130,31 @@ def test_compress_history_by_token_budget_no_change_when_budget_large() -> None:
     assert len(compressed) == 2
     assert str(compressed[0].content) == "hello"
     assert str(compressed[1].content) == "world"
+
+
+def test_compress_history_mcp_role_mismatch_fallback(monkeypatch) -> None:
+    """当MCP返回的角色顺序不一致时，应回退到本地压缩，避免身份错位。"""
+    history = [
+        HumanMessage(content="用户问题一"),
+        AIMessage(content="助手回答一"),
+    ]
+
+    monkeypatch.setattr("app.agents.langgraph_flow.llmlingua_mcp_enabled", lambda: True)
+    monkeypatch.setattr(
+        "app.agents.langgraph_flow.compress_history_via_llmlingua_mcp",
+        lambda _messages, _target: [
+            {"role": "assistant", "content": "错误映射到用户"},
+            {"role": "user", "content": "错误映射到助手"},
+        ],
+    )
+
+    compressed = _compress_history_by_token_budget(history, max_tokens=1000)
+    assert len(compressed) == 2
+    assert isinstance(compressed[0], HumanMessage)
+    assert isinstance(compressed[1], AIMessage)
+    # 回退后预算足够时应保持原文，不应用错位后的内容。
+    assert str(compressed[0].content) == "用户问题一"
+    assert str(compressed[1].content) == "助手回答一"
 
 
 def test_compress_text_preserves_key_tokens_when_possible() -> None:
