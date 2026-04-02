@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from app.agents.chains import build_qa_chain
 from app.agents.chains import get_session_history
 from app.agents.stream_messages import StreamMessage, MessageType
-from app.core.config import get_settings
+from app.config import get_settings
 from app.memory.read_only_memory import load_memory_chunks, retrieve_memory_context
 from app.memory.sqlite_memory import (
     retrieve_memory_context_hybrid_from_sqlite,

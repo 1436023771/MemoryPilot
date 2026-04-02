@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from app.knowledge.chunking import load_text_documents, split_document_text
-from app.cli.ingest_config import chapter_analysis_concurrency
+from app.config.ingest import chapter_analysis_concurrency
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.narrative_extraction import build_narrative_fields_batch_async
 from app.knowledge.pg_env import resolve_pg_dsn

@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import time
 
-from app.cli.sync_bookshelf_config import (
+from app.config.sync_bookshelf import (
     chapter_analysis_concurrency,
     incremental_enabled,
     auto_delete_removed,

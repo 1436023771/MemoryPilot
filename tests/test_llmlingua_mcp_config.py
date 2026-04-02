@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.agents.execution_config import (
+from app.config.execution import (
     llmlingua_mcp_enabled,
     llmlingua_mcp_server_url,
     llmlingua_mcp_timeout_seconds,

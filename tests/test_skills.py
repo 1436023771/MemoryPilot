@@ -6,6 +6,14 @@ Tests skill registration, configuration, and selection logic.
 
 import pytest
 from app.agents.skills import skill_registry, SkillRegistry, Skill, SkillConfig
+from app.agents.skills.runtime import (
+    DEFAULT_SKILL_NAME,
+    process_context_for_skill,
+    resolve_prompt_key,
+    resolve_skill_name,
+    resolve_tool_display_name,
+    select_tools_for_skill,
+)
 
 
 class TestSkillRegistry:
@@ -155,3 +163,42 @@ class TestSkillContextProcessing:
         result = skill.process_context("memory", "knowledge")
         assert result["memory_ctx"] == "[CUSTOM] memory"
         assert result["knowledge_ctx"] == "[CUSTOM] knowledge"
+
+
+class TestSkillRuntimeHelpers:
+    """Test skill runtime helper functions."""
+
+    def test_resolve_skill_name_fallbacks_to_general(self):
+        assert resolve_skill_name("non-existent-skill") == DEFAULT_SKILL_NAME
+        assert resolve_skill_name("") == DEFAULT_SKILL_NAME
+
+    def test_select_tools_for_skill_applies_restrictions(self):
+        reading_tools = [tool.name for tool in select_tools_for_skill("reading-companion")]
+        general_tools = [tool.name for tool in select_tools_for_skill("general")]
+
+        assert "web_search" not in reading_tools
+        assert "retrieve_pg_knowledge" in reading_tools
+        assert "run_python_code" in reading_tools
+        assert "run_docker_command" in reading_tools
+
+        assert "web_search" in general_tools
+        assert "retrieve_pg_knowledge" in general_tools
+
+    def test_resolve_tool_display_name_prefers_skill_custom_name(self):
+        assert resolve_tool_display_name("reading-companion", "run_python_code") == "数据处理"
+        assert resolve_tool_display_name("reading-companion", "run_docker_command") == "高级计算"
+
+    def test_resolve_prompt_key_uses_skill_override(self):
+        assert (
+            resolve_prompt_key("reading-companion", "agents.langgraph.final_user_prompt")
+            == "agents.langgraph.reading_companion_prompt"
+        )
+        assert (
+            resolve_prompt_key("general", "agents.langgraph.final_user_prompt")
+            == "agents.langgraph.final_user_prompt"
+        )
+
+    def test_process_context_for_skill_keeps_default_behavior(self):
+        memory_ctx, knowledge_ctx = process_context_for_skill("general", "m", "k")
+        assert memory_ctx == "m"
+        assert knowledge_ctx == "k"

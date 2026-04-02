@@ -22,10 +22,18 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
 
-from app.agents.tools import retrieve_pg_knowledge, run_docker_command, run_python_code, web_search
+from app.agents.tool_registry import tool_registry
 from app.agents.stream_messages import StreamMessage, MessageType
-from app.agents.skills import skill_registry
-from app.agents.langgraph_config import (
+from app.agents.skills import (
+    DEFAULT_SKILL_NAME,
+    process_context_for_skill,
+    resolve_prompt_key,
+    resolve_skill_name,
+    resolve_tool_display_name,
+    select_tools_for_skill,
+    skill_registry,
+)
+from app.config.langgraph import (
     langchain_project,
     max_history_tokens,
     DEFAULT_MAX_HISTORY_TOKENS,
@@ -33,9 +41,10 @@ from app.agents.langgraph_config import (
     context_window_default,
     rerank_candidates_default,
 )
-from app.agents.execution_config import docker_workdir_mount
-from app.agents.execution_config import llmlingua_mcp_enabled
+from app.config.execution import docker_workdir_mount
+from app.config.execution import llmlingua_mcp_enabled
 from app.agents.llmlingua_mcp_client import compress_text_via_llmlingua_mcp, compress_history_via_llmlingua_mcp
+from app.config import get_settings
 from app.core.config import Settings
 from app.core.prompt_store import render_prompt
 
@@ -442,12 +451,12 @@ def _skill_planning_node(state: QAState) -> QAState:
     """
     question = str(state.get("question", "")).strip()
     if not question:
-        return {"selected_skill": "general"}
+        return {"selected_skill": DEFAULT_SKILL_NAME}
     
     # Get available skills
     skills_list = skill_registry.list_descriptions()
     if not skills_list:
-        return {"selected_skill": "general"}
+        return {"selected_skill": DEFAULT_SKILL_NAME}
     
     # Create LLM decision prompt
     decision_prompt = f"""根据用户问题，选择最合适的处理mode。
@@ -465,9 +474,8 @@ def _skill_planning_node(state: QAState) -> QAState:
     
     try:
         from langchain_openai import ChatOpenAI
-        from app.core.config import Settings
-        
-        settings = Settings()
+
+        settings = get_settings()
         model = ChatOpenAI(
             model=settings.model_name,
             temperature=0.3,
@@ -486,24 +494,19 @@ def _skill_planning_node(state: QAState) -> QAState:
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
                 result = json.loads(json_match.group())
-                selected_skill = str(result.get("selected_skill", "general")).strip()
+                selected_skill = str(result.get("selected_skill", DEFAULT_SKILL_NAME)).strip()
             else:
-                selected_skill = "general"
+                selected_skill = DEFAULT_SKILL_NAME
         except (json.JSONDecodeError, ValueError):
-            selected_skill = "general"
-        
-        # Validate skill exists
-        valid_skills = skill_registry.list_skills()
-        if selected_skill not in valid_skills:
-            selected_skill = "general"
-        
-        return {"selected_skill": selected_skill}
+            selected_skill = DEFAULT_SKILL_NAME
+
+        return {"selected_skill": resolve_skill_name(selected_skill)}
     
     except Exception as e:
         # Fallback to general on any error
         import logging
         logging.warning(f"Skill planning error: {e}, falling back to general")
-        return {"selected_skill": "general"}
+        return {"selected_skill": DEFAULT_SKILL_NAME}
 
 
 def _knowledge_node(state: QAState) -> QAState:
@@ -513,11 +516,15 @@ def _knowledge_node(state: QAState) -> QAState:
 
     messages = [StreamMessage.progress("正在检索知识库...")]
     try:
+        knowledge_tool = tool_registry.get_tool("retrieve_pg_knowledge")
+        if knowledge_tool is None:
+            raise RuntimeError("retrieve_pg_knowledge tool is not available")
+
         default_top_k = top_k_default()
         default_context_window = context_window_default()
         default_rerank_candidates = rerank_candidates_default()
         # 先做召回+重排，再把结果回传给回答节点。
-        retrieved = retrieve_pg_knowledge.invoke(
+        retrieved = knowledge_tool.invoke(
             {
                 "query": question,
                 "top_k": default_top_k,
@@ -552,21 +559,13 @@ def _build_prompt_node(state: QAState) -> QAState:
     messages: list[StreamMessage] = []
 
     # Backward compatibility: if no skill was selected yet, infer from route.
-    if selected_skill_name:
-        skill = skill_registry.get_skill(selected_skill_name)
-    else:
-        skill_name = "reading-companion" if route == "knowledge" else "general"
-        skill = skill_registry.get_skill(skill_name)
+    effective_skill_name = selected_skill_name
+    if not effective_skill_name:
+        effective_skill_name = "reading-companion" if route == "knowledge" else DEFAULT_SKILL_NAME
+    effective_skill_name = resolve_skill_name(effective_skill_name)
 
-    if not skill:
-        skill = skill_registry.get_skill("general")
-
-    if skill and skill.config.context_processor:
-        ctx = skill.process_context(memory_ctx, knowledge_ctx)
-        memory_ctx = ctx.get("memory_ctx", memory_ctx)
-        knowledge_ctx = ctx.get("knowledge_ctx", knowledge_ctx)
-
-    prompt_key = skill.config.system_prompt_override if skill and skill.config.system_prompt_override else "agents.langgraph.final_user_prompt"
+    memory_ctx, knowledge_ctx = process_context_for_skill(effective_skill_name, memory_ctx, knowledge_ctx)
+    prompt_key = resolve_prompt_key(effective_skill_name, "agents.langgraph.final_user_prompt")
 
     prompt = render_prompt(
         prompt_key,
@@ -588,16 +587,6 @@ def _build_prompt_node(state: QAState) -> QAState:
     return {"final_prompt": prompt, "messages": chat_messages, "stream_messages": messages}
 
 
-def _tool_display_name(tool_name: str) -> str:
-    mapping = {
-        "run_python_code": "Python计算器",
-        "run_docker_command": "Docker沙箱",
-        "web_search": "联网搜索",
-        "retrieve_pg_knowledge": "知识库检索",
-    }
-    return mapping.get(tool_name, tool_name)
-
-
 def _assistant_node_factory(model_factory: Callable):
     """Create assistant node with dynamic tool binding based on skill.
     
@@ -611,20 +600,10 @@ def _assistant_node_factory(model_factory: Callable):
             messages = []
 
         # Get selected skill and filter tools accordingly
-        selected_skill_name = str(state.get("selected_skill", "general") or "general")
-        skill = skill_registry.get_skill(selected_skill_name)
-        if not skill:
-            skill = skill_registry.get_skill("general")
+        selected_skill_name = resolve_skill_name(str(state.get("selected_skill", DEFAULT_SKILL_NAME) or DEFAULT_SKILL_NAME))
         
         # Determine which tools to bind
-        all_tools = [web_search, retrieve_pg_knowledge, run_python_code, run_docker_command]
-        if skill and skill.config.available_tools:
-            # Filter to only allowed tools
-            allowed_tool_names = set(skill.config.available_tools)
-            filtered_tools = [t for t in all_tools if t.name in allowed_tool_names]
-        else:
-            # No restriction, use all tools
-            filtered_tools = all_tools
+        filtered_tools = select_tools_for_skill(selected_skill_name)
         
         # Create model with skill-specific tools
         base_model = model_factory()
@@ -664,12 +643,7 @@ def _assistant_node_factory(model_factory: Callable):
             for call in tool_calls:
                 tool_name = str(call.get("name", "")).strip() or "unknown_tool"
                 args = call.get("args", {})
-                # Use skill's tool display names if available
-                display_name = tool_name
-                if skill and skill.config.tool_display_names:
-                    display_name = skill.config.tool_display_names.get(tool_name, _tool_display_name(tool_name))
-                else:
-                    display_name = _tool_display_name(tool_name)
+                display_name = resolve_tool_display_name(selected_skill_name, tool_name)
                 stream_messages.append(
                     StreamMessage.tool_start(
                         tool_name,
@@ -765,9 +739,7 @@ def build_langgraph_chain(
     )
     graph.add_node(
         "tools",
-        ToolNode([web_search, retrieve_pg_knowledge, run_python_code, run_docker_command]).with_config(
-            _node_config("tools", ["tool-calls"])
-        ),
+        ToolNode(tool_registry.get_all_tools()).with_config(_node_config("tools", ["tool-calls"])),
     )
     graph.add_node("finalize", RunnableLambda(_finalize_node).with_config(_node_config("finalize")))
 

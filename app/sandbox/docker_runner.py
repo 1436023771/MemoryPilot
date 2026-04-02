@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 
-from app.agents.execution_config import (
+from app.config.execution import (
     docker_cpu_limit,
     docker_exec_timeout_seconds,
     docker_max_command_chars,

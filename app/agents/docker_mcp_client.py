@@ -6,7 +6,7 @@ import os
 import shlex
 from typing import Any
 
-from app.agents.execution_config import docker_mcp_command, docker_mcp_timeout_seconds
+from app.config.execution import docker_mcp_command, docker_mcp_timeout_seconds
 
 
 def _extract_text_from_mcp_result(result: Any) -> str:

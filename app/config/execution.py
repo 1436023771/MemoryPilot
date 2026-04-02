@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from app.core.config import get_env_bool, get_env_int
+from app.config import get_env_bool, get_env_int
 
 
 def docker_sandbox_enabled() -> bool:
@@ -79,7 +79,7 @@ def llmlingua_mcp_server_url() -> str:
 
 
 def llmlingua_mcp_timeout_seconds() -> int:
-    return get_env_int("LLMLINGUA_MCP_TIMEOUT", default=300, min_value=5)
+    return get_env_int("LLMLINGUA_MCP_TIMEOUT", default=30, min_value=5)
 
 
 def llmlingua_model_name() -> str:

@@ -5,7 +5,7 @@
 
 ### 创建的新配置模块
 
-#### 1. `app/cli/sync_bookshelf_config.py`
+#### 1. `app/config/sync_bookshelf.py`
 **职责**：集中管理 `sync_bookshelf.py` 的环境变量读取
 
 **导出函数**：
@@ -16,7 +16,7 @@
 - `show_incremental_stats()` - 是否显示增量统计信息
 - `state_file_path()` - 增量同步状态文件的路径
 
-#### 2. `app/agents/knowledge_config.py`
+#### 2. `app/config/knowledge.py`
 **职责**：集中管理知识检索和重排相关的环境变量
 
 **导出函数**：
@@ -28,7 +28,7 @@
 - `context_window_default()` - 默认上下文窗口大小
 - `rerank_candidates_default()` - 默认重排候选数
 
-#### 3. `app/agents/langgraph_config.py`
+#### 3. `app/config/langgraph.py`
 **职责**：集中管理 LangGraph 流程的环境变量
 
 **导出函数**：
@@ -38,7 +38,7 @@
 - `context_window_default()` - 默认上下文窗口大小
 - `rerank_candidates_default()` - 默认重排候选数
 
-#### 4. `app/cli/ingest_config.py`
+#### 4. `app/config/ingest.py`
 **职责**：集中管理 `ingest_pg_knowledge.py` 的环境变量
 
 **导出函数**：
@@ -48,26 +48,26 @@
 
 #### `app/cli/sync_bookshelf.py`
 - **删除**：`_chapter_analysis_concurrency()`、`_default_incremental_enabled()`、`_default_auto_delete_removed()`、`_default_hash_check()`、`_default_show_incremental_stats()`、`_default_state_file_path()` 函数
-- **新增导入**：从 `app.cli.sync_bookshelf_config` 导入所有配置函数
+- **新增导入**：从 `app.config.sync_bookshelf` 导入所有配置函数
 - **更新**：所有环境变量读取调用改为使用导入的配置函数
 
 #### `app/agents/tools_pg_knowledge.py`
 - **删除**：`get_env_float`、`get_env_int` 从导入列表中移除
-- **新增导入**：从 `app.agents.knowledge_config` 导入所有配置函数
+- **新增导入**：从 `app.config.knowledge` 导入所有配置函数
 - **简化**：`_local_rerank_weights()` 和 `_blend_weights()` 现在直接代理到配置模块的函数
 - **更新**：`os.getenv("PGVECTOR_TABLE"...)` 改为 `pgvector_table()`；`os.getenv("PGVECTOR_EMBEDDING_MODEL"...)` 改为 `pgvector_embedding_model()`
 - **更新**：所有 `get_env_int("KNOWLEDGE_...")` 调用改为调用相应的配置函数
 
 #### `app/agents/langgraph_flow.py`
 - **删除**：`get_env_int` 从导入列表中移除
-- **新增导入**：从 `app.agents.langgraph_config` 导入所有配置函数
+- **新增导入**：从 `app.config.langgraph` 导入所有配置函数
 - **简化**：`_graph_config()` 现在调用 `langchain_project()` 而不是 `os.getenv()`
 - **简化**：`_history_token_limit()` 现在直接调用 `max_history_tokens()`
 - **更新**：所有 `get_env_int("KNOWLEDGE_...")` 调用改为调用相应的配置函数
 
 #### `app/cli/ingest_pg_knowledge.py`
 - **删除**：`get_env_int` 从导入列表中移除和 `_chapter_analysis_concurrency()` 函数
-- **新增导入**：从 `app.cli.ingest_config` 导入 `chapter_analysis_concurrency`
+- **新增导入**：从 `app.config.ingest` 导入 `chapter_analysis_concurrency`
 - **更新**：所有 `_chapter_analysis_concurrency()` 调用改为 `chapter_analysis_concurrency()`
 
 ### 设计原则
@@ -75,7 +75,7 @@
 1. **单一职责**：每个配置模块只负责其对应功能模块的环境变量读取
 2. **无业务逻辑**：配置模块不包含任何业务实现逻辑，仅负责参数获取和验证
 3. **统一入口**：所有环境变量访问必须通过配置模块，避免散落在业务代码中
-4. **明确的映射**：配置模块文件位置与使用它的业务模块位置相近或配对
+4. **明确的映射**：配置模块统一收敛到 `app/config/`，业务模块只从该目录导入
 5. **向下兼容**：所有现有功能保持不变，仅代码结构改善
 
 ### 带来的好处
@@ -121,7 +121,7 @@ runtime['incremental'] = _default_incremental_enabled()
 
 **之后**：环境变量读取集中在配置模块
 ```python
-# 在 sync_bookshelf_config.py 中
+# 在 app/config/sync_bookshelf.py 中
 def chapter_analysis_concurrency() -> int:
     return get_env_int("KNOWLEDGE_CHAPTER_ANALYSIS_CONCURRENCY", default=4, min_value=1)
 
@@ -129,7 +129,7 @@ def incremental_enabled() -> bool:
     return get_env_bool("KNOWLEDGE_SYNC_INCREMENTAL", default=True)
 
 # 在 sync_bookshelf.py 中
-from app.cli.sync_bookshelf_config import chapter_analysis_concurrency, incremental_enabled
+from app.config.sync_bookshelf import chapter_analysis_concurrency, incremental_enabled
 
 semaphore = asyncio.Semaphore(chapter_analysis_concurrency())
 runtime['incremental'] = incremental_enabled()

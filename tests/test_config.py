@@ -1,6 +1,7 @@
 import pytest
 
-from app.core.config import get_env_bool, get_env_float, get_env_int, get_settings
+from app.config import get_env_bool, get_env_float, get_env_int, get_settings
+from app.core.config import get_settings as legacy_get_settings
 
 
 def test_deepseek_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,3 +57,11 @@ def test_get_env_bool_accepts_common_literals(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setenv("KNOWLEDGE_SYNC_INCREMENTAL", "off")
     assert get_env_bool("KNOWLEDGE_SYNC_INCREMENTAL", default=True) is False
+
+
+def test_legacy_config_wrapper_matches_new_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("MODEL_NAME", "deepseek-chat")
+
+    assert get_settings() == legacy_get_settings()

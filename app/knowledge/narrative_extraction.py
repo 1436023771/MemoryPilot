@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from app.core.config import get_settings
+from app.config import get_settings
 from app.core.prompt_store import render_prompt
 
 try:

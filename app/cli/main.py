@@ -3,7 +3,7 @@ from pathlib import Path
 
 from app.agents.chains import build_qa_chain
 from app.agents.chains import get_session_history
-from app.core.config import get_settings
+from app.config import get_settings
 from app.memory.read_only_memory import load_memory_chunks, retrieve_memory_context
 from app.memory.sqlite_memory import (
     load_memory_chunks_from_sqlite,

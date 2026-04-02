@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from langchain.tools import tool
 from app.agents.docker_mcp_client import call_docker_command_via_mcp, call_python_in_docker_via_mcp
-from app.agents.execution_config import docker_mcp_enabled
+from app.config.execution import docker_mcp_enabled
 from app.sandbox.docker_runner import execute_docker_shell, execute_python_in_docker
 
 _docker_exec_log: list[dict] = []
@@ -50,6 +50,9 @@ def _run_docker_command_impl(command: str, timeout_seconds: int = 30) -> str:
     normalized = (command or "").strip()
     if docker_mcp_enabled():
         result = call_docker_command_via_mcp(command=normalized, timeout_seconds=timeout_seconds)
+        # Keep local path as resilience fallback when MCP server/command is unavailable.
+        if str(result).startswith("MCP 调用失败"):
+            result = execute_docker_shell(command=normalized, timeout_seconds=timeout_seconds)
     else:
         result = execute_docker_shell(command=normalized, timeout_seconds=timeout_seconds)
     record_docker_exec("shell", normalized, result)
@@ -84,6 +87,8 @@ def _run_python_in_docker_impl(code: str, timeout_seconds: int = 30) -> str:
     normalized = (code or "").strip()
     if docker_mcp_enabled():
         result = call_python_in_docker_via_mcp(code=normalized, timeout_seconds=timeout_seconds)
+        if str(result).startswith("MCP 调用失败"):
+            result = execute_python_in_docker(code=normalized, timeout_seconds=timeout_seconds)
     else:
         result = execute_python_in_docker(code=normalized, timeout_seconds=timeout_seconds)
     record_docker_exec("python", normalized, result)

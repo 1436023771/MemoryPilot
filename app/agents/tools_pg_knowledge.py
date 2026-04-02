@@ -10,9 +10,9 @@ from typing import Any
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
-from app.core.config import get_settings
+from app.config import get_settings
 from app.core.prompt_store import render_prompt
-from app.agents.knowledge_config import (
+from app.config.knowledge import (
     pgvector_table,
     pgvector_embedding_model,
     local_rerank_weights,
