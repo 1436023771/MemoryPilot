@@ -205,6 +205,12 @@ When tracing is enabled, LangGraph runs are reported with:
 - graph run name: `langgraph_qa_chain`
 - node run names: `lg_plan`, `lg_retrieve_knowledge`, `lg_build_prompt`, `lg_assistant`, `lg_tools`, `lg_finalize`
 
+Assistant persona behavior:
+
+- Default persona is a general execution-oriented assistant.
+- Reading companion behavior is extracted as a skill and activated on knowledge-route requests.
+- Skill definition is stored at `.github/skills/reading-companion/SKILL.md`.
+
 Start desktop chat window (GUI, defaults to short-term + long-term memory):
 
 ```bash

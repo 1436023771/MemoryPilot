@@ -2,6 +2,7 @@ from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agents.langgraph_flow import StreamingLanggraphChain, _finalize_node
+from app.agents.langgraph_flow import _build_prompt_node
 from app.agents.langgraph_flow import _compress_history_by_token_budget
 from app.agents.langgraph_flow import _compress_text_to_token_budget
 from app.agents.langgraph_flow import _estimate_message_tokens
@@ -171,3 +172,53 @@ def test_compress_text_preserves_key_tokens_when_possible() -> None:
     assert "2026-03-28" in compressed
     assert "12000" in compressed
     assert ("不要" in compressed) or ("不" in compressed)
+
+
+def test_build_prompt_uses_general_prompt_for_direct_route(monkeypatch) -> None:
+    """direct 路径应使用通用 prompt。"""
+    seen: dict[str, str] = {}
+
+    def _fake_render(key: str, **_kwargs):
+        seen["key"] = key
+        return f"PROMPT::{key}"
+
+    monkeypatch.setattr("app.agents.langgraph_flow.render_prompt", _fake_render)
+    monkeypatch.setattr("app.agents.langgraph_flow.docker_workdir_mount", lambda: None)
+
+    result = _build_prompt_node(
+        {
+            "route": "direct",
+            "question": "帮我总结一下今天的任务",
+            "retrieved_context": "",
+            "knowledge_context": "",
+            "history": [],
+        }
+    )
+
+    assert seen.get("key") == "agents.langgraph.final_user_prompt"
+    assert result.get("final_prompt") == "PROMPT::agents.langgraph.final_user_prompt"
+
+
+def test_build_prompt_uses_reading_prompt_for_knowledge_route(monkeypatch) -> None:
+    """knowledge 路径应使用读书 skill prompt。"""
+    seen: dict[str, str] = {}
+
+    def _fake_render(key: str, **_kwargs):
+        seen["key"] = key
+        return f"PROMPT::{key}"
+
+    monkeypatch.setattr("app.agents.langgraph_flow.render_prompt", _fake_render)
+    monkeypatch.setattr("app.agents.langgraph_flow.docker_workdir_mount", lambda: None)
+
+    result = _build_prompt_node(
+        {
+            "route": "knowledge",
+            "question": "这本书第三章的剧情是什么",
+            "retrieved_context": "",
+            "knowledge_context": "chunk-1",
+            "history": [],
+        }
+    )
+
+    assert seen.get("key") == "agents.langgraph.reading_companion_prompt"
+    assert result.get("final_prompt") == "PROMPT::agents.langgraph.reading_companion_prompt"

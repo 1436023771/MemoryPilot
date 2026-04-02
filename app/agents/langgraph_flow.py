@@ -24,6 +24,7 @@ from langchain_openai import ChatOpenAI
 
 from app.agents.tools import retrieve_pg_knowledge, run_docker_command, run_python_code, web_search
 from app.agents.stream_messages import StreamMessage, MessageType
+from app.agents.skills import skill_registry
 from app.agents.langgraph_config import (
     langchain_project,
     max_history_tokens,
@@ -54,6 +55,7 @@ class QAState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     stream_messages: Annotated[list[StreamMessage], _add_stream_messages]  # 新增：流式消息
     route: str
+    selected_skill: str  # 新增：LLM 选择的 skill 名称
     knowledge_context: str
     final_prompt: str
     answer: str
@@ -432,6 +434,78 @@ def _plan_node(state: QAState) -> QAState:
     return {"route": route, "stream_messages": messages}
 
 
+def _skill_planning_node(state: QAState) -> QAState:
+    """LLM-based skill selection node.
+    
+    Let LLM choose the most appropriate skill for the user's question.
+    Falls back to 'general' if LLM cannot decide.
+    """
+    question = str(state.get("question", "")).strip()
+    if not question:
+        return {"selected_skill": "general"}
+    
+    # Get available skills
+    skills_list = skill_registry.list_descriptions()
+    if not skills_list:
+        return {"selected_skill": "general"}
+    
+    # Create LLM decision prompt
+    decision_prompt = f"""根据用户问题，选择最合适的处理mode。
+
+可用的模式（skills）：
+{skills_list}
+
+用户问题：
+{question}
+
+请返回JSON格式的决策结果，只返回JSON，不要任何其他文字。
+格式: {{"selected_skill": "skill_name"}}
+如果无法判断，选择 "general"。
+"""
+    
+    try:
+        from langchain_openai import ChatOpenAI
+        from app.core.config import Settings
+        
+        settings = Settings()
+        model = ChatOpenAI(
+            model=settings.model_name,
+            temperature=0.3,
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+        )
+        
+        response = model.invoke(decision_prompt)
+        content = str(getattr(response, "content", "") or "").strip()
+        
+        # Parse JSON response
+        import json
+        import re
+        try:
+            # Try to extract JSON from response
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                result = json.loads(json_match.group())
+                selected_skill = str(result.get("selected_skill", "general")).strip()
+            else:
+                selected_skill = "general"
+        except (json.JSONDecodeError, ValueError):
+            selected_skill = "general"
+        
+        # Validate skill exists
+        valid_skills = skill_registry.list_skills()
+        if selected_skill not in valid_skills:
+            selected_skill = "general"
+        
+        return {"selected_skill": selected_skill}
+    
+    except Exception as e:
+        # Fallback to general on any error
+        import logging
+        logging.warning(f"Skill planning error: {e}, falling back to general")
+        return {"selected_skill": "general"}
+
+
 def _knowledge_node(state: QAState) -> QAState:
     question = str(state.get("question", "")).strip()
     if not question:
@@ -464,6 +538,8 @@ def _knowledge_node(state: QAState) -> QAState:
 
 def _build_prompt_node(state: QAState) -> QAState:
     question = str(state.get("question", "")).strip()
+    route = str(state.get("route", "direct") or "direct")
+    selected_skill_name = str(state.get("selected_skill", "") or "")
     memory_ctx = str(state.get("retrieved_context", "")).strip() or "(none)"
     knowledge_ctx = str(state.get("knowledge_context", "")).strip() or "(none)"
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -475,8 +551,25 @@ def _build_prompt_node(state: QAState) -> QAState:
 
     messages: list[StreamMessage] = []
 
+    # Backward compatibility: if no skill was selected yet, infer from route.
+    if selected_skill_name:
+        skill = skill_registry.get_skill(selected_skill_name)
+    else:
+        skill_name = "reading-companion" if route == "knowledge" else "general"
+        skill = skill_registry.get_skill(skill_name)
+
+    if not skill:
+        skill = skill_registry.get_skill("general")
+
+    if skill and skill.config.context_processor:
+        ctx = skill.process_context(memory_ctx, knowledge_ctx)
+        memory_ctx = ctx.get("memory_ctx", memory_ctx)
+        knowledge_ctx = ctx.get("knowledge_ctx", knowledge_ctx)
+
+    prompt_key = skill.config.system_prompt_override if skill and skill.config.system_prompt_override else "agents.langgraph.final_user_prompt"
+
     prompt = render_prompt(
-        "agents.langgraph.final_user_prompt",
+        prompt_key,
         now_local=now_local,
         question=question,
         memory_ctx=memory_ctx,
@@ -505,11 +598,37 @@ def _tool_display_name(tool_name: str) -> str:
     return mapping.get(tool_name, tool_name)
 
 
-def _assistant_node_factory(model_with_tools):
+def _assistant_node_factory(model_factory: Callable):
+    """Create assistant node with dynamic tool binding based on skill.
+    
+    Args:
+        model_factory: Callable that returns a ChatOpenAI model.
+                      Used to create models with skill-specific tools.
+    """
     def _assistant_node(state: QAState) -> QAState:
         messages = state.get("messages", [])
         if not isinstance(messages, list):
             messages = []
+
+        # Get selected skill and filter tools accordingly
+        selected_skill_name = str(state.get("selected_skill", "general") or "general")
+        skill = skill_registry.get_skill(selected_skill_name)
+        if not skill:
+            skill = skill_registry.get_skill("general")
+        
+        # Determine which tools to bind
+        all_tools = [web_search, retrieve_pg_knowledge, run_python_code, run_docker_command]
+        if skill and skill.config.available_tools:
+            # Filter to only allowed tools
+            allowed_tool_names = set(skill.config.available_tools)
+            filtered_tools = [t for t in all_tools if t.name in allowed_tool_names]
+        else:
+            # No restriction, use all tools
+            filtered_tools = all_tools
+        
+        # Create model with skill-specific tools
+        base_model = model_factory()
+        model_with_tools = base_model.bind_tools(filtered_tools)
 
         stream_messages: list[StreamMessage] = []
 
@@ -545,7 +664,12 @@ def _assistant_node_factory(model_with_tools):
             for call in tool_calls:
                 tool_name = str(call.get("name", "")).strip() or "unknown_tool"
                 args = call.get("args", {})
-                display_name = _tool_display_name(tool_name)
+                # Use skill's tool display names if available
+                display_name = tool_name
+                if skill and skill.config.tool_display_names:
+                    display_name = skill.config.tool_display_names.get(tool_name, _tool_display_name(tool_name))
+                else:
+                    display_name = _tool_display_name(tool_name)
                 stream_messages.append(
                     StreamMessage.tool_start(
                         tool_name,
@@ -619,10 +743,17 @@ def build_langgraph_chain(
         base_url=settings.base_url,
     )
 
-    model_with_tools = model.bind_tools([web_search, retrieve_pg_knowledge, run_python_code, run_docker_command])
+    # Create a model factory lambda that can be called at runtime to create fresh models
+    model_factory = lambda: ChatOpenAI(
+        model=settings.model_name,
+        temperature=settings.temperature,
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+    )
 
     graph = StateGraph(QAState)
     graph.add_node("plan", RunnableLambda(_plan_node).with_config(_node_config("plan")))
+    graph.add_node("skill_planning", RunnableLambda(_skill_planning_node).with_config(_node_config("skill_planning")))
     graph.add_node(
         "retrieve_knowledge",
         RunnableLambda(_knowledge_node).with_config(_node_config("retrieve_knowledge", ["retrieval"])),
@@ -630,7 +761,7 @@ def build_langgraph_chain(
     graph.add_node("build_prompt", RunnableLambda(_build_prompt_node).with_config(_node_config("build_prompt")))
     graph.add_node(
         "assistant",
-        RunnableLambda(_assistant_node_factory(model_with_tools)).with_config(_node_config("assistant", ["llm"])),
+        RunnableLambda(_assistant_node_factory(model_factory)).with_config(_node_config("assistant", ["llm"])),
     )
     graph.add_node(
         "tools",
@@ -641,8 +772,9 @@ def build_langgraph_chain(
     graph.add_node("finalize", RunnableLambda(_finalize_node).with_config(_node_config("finalize")))
 
     graph.add_edge(START, "plan")
+    graph.add_edge("plan", "skill_planning")
     graph.add_conditional_edges(
-        "plan",
+        "skill_planning",
         _route_from_plan,
         {
             "knowledge": "retrieve_knowledge",
