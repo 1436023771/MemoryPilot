@@ -41,7 +41,7 @@ def test_run_docker_command_success(monkeypatch) -> None:
             stderr="",
         )
 
-    monkeypatch.setattr("app.agents.tools_docker_sandbox.subprocess.run", _fake_run)
+    monkeypatch.setattr("app.sandbox.docker_runner.subprocess.run", _fake_run)
 
     result = run_docker_command.invoke({"command": "echo ok"})
 
@@ -50,3 +50,19 @@ def test_run_docker_command_success(monkeypatch) -> None:
     logs = get_docker_exec_log()
     assert len(logs) == 1
     assert logs[0]["mode"] == "shell"
+
+
+def test_run_docker_command_uses_mcp_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("DOCKER_MCP_ENABLED", "true")
+    clear_docker_exec_log()
+    monkeypatch.setattr(
+        "app.agents.tools_docker_sandbox.call_docker_command_via_mcp",
+        lambda command, timeout_seconds: "exit_code: 0\nstdout:\nmcp-ok\n\nstderr:\n(empty)",
+    )
+
+    result = run_docker_command.invoke({"command": "echo from mcp"})
+
+    assert "mcp-ok" in result
+    logs = get_docker_exec_log()
+    assert len(logs) == 1
+    assert "echo from mcp" in logs[0]["command"]

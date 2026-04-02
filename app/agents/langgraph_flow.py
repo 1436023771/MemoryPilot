@@ -33,6 +33,8 @@ from app.agents.langgraph_config import (
     rerank_candidates_default,
 )
 from app.agents.execution_config import docker_workdir_mount
+from app.agents.execution_config import llmlingua_mcp_enabled
+from app.agents.llmlingua_mcp_client import compress_text_via_llmlingua_mcp, compress_history_via_llmlingua_mcp
 from app.core.config import Settings
 from app.core.prompt_store import render_prompt
 
@@ -285,6 +287,12 @@ def _compress_text_to_token_budget(text: str, max_tokens: int) -> str:
     if max_tokens <= 0:
         return ""
 
+    if llmlingua_mcp_enabled():
+        key_tokens = _extract_key_tokens(raw)
+        mcp_compressed = compress_text_via_llmlingua_mcp(raw, int(max_tokens), preserve_keywords=key_tokens)
+        if isinstance(mcp_compressed, str) and mcp_compressed.strip():
+            return mcp_compressed
+
     estimated = _estimate_text_tokens(raw)
     if estimated <= max_tokens:
         return raw
@@ -326,6 +334,32 @@ def _compress_history_by_token_budget(history: list[BaseMessage], max_tokens: in
         return []
     if max_tokens <= 0:
         return [_copy_message_with_content(msg, "") for msg in history]
+
+    if llmlingua_mcp_enabled():
+        role_payload: list[dict[str, str]] = []
+        for msg in history:
+            role = "user"
+            if isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            elif isinstance(msg, SystemMessage):
+                role = "system"
+            elif isinstance(msg, ToolMessage):
+                role = "tool"
+
+            content = getattr(msg, "content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            role_payload.append({"role": role, "content": content})
+
+        compressed_payload = compress_history_via_llmlingua_mcp(role_payload, int(max_tokens))
+        if isinstance(compressed_payload, list) and len(compressed_payload) == len(history):
+            compressed_msgs: list[BaseMessage] = []
+            for msg, payload in zip(history, compressed_payload, strict=False):
+                new_content = str(payload.get("content", "") or "")
+                compressed_msgs.append(_copy_message_with_content(msg, new_content))
+            return compressed_msgs
 
     costs = [_estimate_message_tokens(msg) for msg in history]
     total = sum(costs)
@@ -402,8 +436,12 @@ def _knowledge_node(state: QAState) -> QAState:
                 "rerank_candidates": default_rerank_candidates,
             }
         )
+        compressed_retrieved = _compress_text_to_token_budget(
+            str(retrieved),
+            int(_history_token_limit() * 0.3),
+        )
         messages.append(StreamMessage.progress("知识库检索完成"))
-        return {"knowledge_context": str(retrieved), "stream_messages": messages}
+        return {"knowledge_context": compressed_retrieved, "stream_messages": messages}
     except Exception as exc:  # noqa: BLE001
         messages.append(StreamMessage.error(f"知识检索失败: {exc}"))
         return {"knowledge_context": f"知识检索失败: {exc}", "stream_messages": messages}

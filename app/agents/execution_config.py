@@ -54,3 +54,47 @@ def docker_workdir_mount() -> Path | None:
 
 def docker_max_command_chars() -> int:
     return get_env_int("DOCKER_MAX_COMMAND_CHARS", default=4000, min_value=200)
+
+
+def docker_mcp_enabled() -> bool:
+    return get_env_bool("DOCKER_MCP_ENABLED", default=False)
+
+
+def docker_mcp_command() -> str:
+    raw = os.getenv("DOCKER_MCP_COMMAND", "python -m app.mcp.docker_sandbox_server").strip()
+    return raw or "python -m app.mcp.docker_sandbox_server"
+
+
+def docker_mcp_timeout_seconds() -> int:
+    return get_env_int("DOCKER_MCP_TIMEOUT", default=30, min_value=5)
+
+
+def llmlingua_mcp_enabled() -> bool:
+    return get_env_bool("LLMLINGUA_MCP_ENABLED", default=True)
+
+
+def llmlingua_mcp_server_url() -> str:
+    raw = os.getenv("LLMLINGUA_MCP_SERVER_URL", "http://127.0.0.1:8765/mcp").strip()
+    return raw or "http://127.0.0.1:8765/mcp"
+
+
+def llmlingua_mcp_timeout_seconds() -> int:
+    return get_env_int("LLMLINGUA_MCP_TIMEOUT", default=300, min_value=5)
+
+
+def llmlingua_model_name() -> str:
+    raw = os.getenv("LLMLINGUA_MODEL_NAME", "Qwen/Qwen2-1.5B-Instruct").strip()
+    return raw or "Qwen/Qwen2-1.5B-Instruct"
+
+
+def llmlingua_model_path() -> Path:
+    raw = os.getenv("LLMLINGUA_MODEL_PATH", "./models/qwen-1.5b").strip() or "./models/qwen-1.5b"
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        workspace_root = Path(__file__).resolve().parents[2]
+        path = workspace_root / path
+    return path.resolve()
+
+
+def llmlingua_shared_server() -> bool:
+    return get_env_bool("LLMLINGUA_SHARED_SERVER", default=True)

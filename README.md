@@ -103,6 +103,67 @@ Notes:
 - New tool `run_docker_command` is available for shell/file/network operations in the container.
 - If `DOCKER_SANDBOX_ENABLED=false`, sandbox tools return an explicit error instead of running on host.
 
+MCP server (initial implementation, for future decoupling):
+
+```bash
+python -m app.mcp.docker_sandbox_server
+```
+
+This server exposes `run_docker_command` and `run_python_in_docker` over MCP, backed by the shared sandbox core in `app/sandbox/docker_runner.py`.
+
+To route agent docker tools through MCP instead of local direct execution:
+
+```env
+DOCKER_MCP_ENABLED=true
+DOCKER_MCP_COMMAND=python -m app.mcp.docker_sandbox_server
+DOCKER_MCP_TIMEOUT=30
+```
+
+When `DOCKER_MCP_ENABLED=true`, `run_docker_command` and `run_python_code` will call the MCP server path.
+
+One-command local stack launcher (main app + multiple MCP servers):
+
+```bash
+# Start LLMLingua MCP + Docker MCP, then run main app in foreground
+./scripts/dev_stack.sh up
+
+# Or run main app in background too
+./scripts/dev_stack.sh up --detach-app
+
+# Custom app command
+./scripts/dev_stack.sh up --app-cmd "python -m app.ui.gui_chat"
+
+# Stop all managed processes
+./scripts/dev_stack.sh down
+
+# Inspect status/logs
+./scripts/dev_stack.sh status
+./scripts/dev_stack.sh logs all
+```
+
+Lightweight alias mode (all + per-service up/down):
+
+```bash
+source ./scripts/dev_aliases.sh
+
+# all
+ds-all-up
+ds-all-down
+ds-force-down
+ds-force-down-now
+ds-all-cli-up
+
+# single service
+ds-llm-up && ds-llm-down
+ds-docker-up && ds-docker-down
+ds-app-up && ds-app-down
+ds-app-cli-up
+
+# inspect
+ds-status
+ds-logs
+```
+
 4. Run the demo chain:
 
 ```bash

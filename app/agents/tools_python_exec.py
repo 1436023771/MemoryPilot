@@ -7,7 +7,7 @@ from __future__ import annotations
 import re
 
 from langchain.tools import tool
-from app.agents.tools_docker_sandbox import run_python_in_docker
+from app.agents.tools_docker_sandbox import _run_python_in_docker_impl
 
 _MAX_PY_CODE_CHARS = 8000
 _MAX_TOOL_OUTPUT_CHARS = 6000
@@ -63,7 +63,7 @@ def run_python_code(code: str) -> str:
         record_python_exec(normalized, result)
         return result
 
-    result = run_python_in_docker(normalized)
+    result = _run_python_in_docker_impl(normalized)
     record_python_exec(normalized, result)
     return result
 

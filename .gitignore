@@ -23,7 +23,8 @@ agent/
 # memory/*.db
 # memory/*.db-*
 memory/
-
+models/
+.run/
 # IDE files
 .vscode/
 .DS_Store
