@@ -63,6 +63,19 @@ agents.langgraph.reading_companion_prompt: |
   检索到的知识库上下文：
   {{knowledge_ctx}}
 
+agents.langgraph.skill_planning_prompt: |
+  根据用户问题，选择最合适的处理 mode。
+
+  可用的模式（skills）：
+  {{skills_list}}
+
+  用户问题：
+  {{question}}
+
+  请返回 JSON 格式的决策结果，只返回 JSON，不要任何其他文字。
+  格式: {"selected_skill": "skill_name"}
+  如果无法判断，选择 "general"。
+
 agents.pg_knowledge.query_analysis: |
   你是检索查询分析器。请解析用户问题并输出严格 JSON。
   字段要求：

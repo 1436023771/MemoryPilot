@@ -15,6 +15,6 @@ def get_session_history(session_id: str) -> SessionHistory:
 
 def build_qa_chain(settings: Settings):
     """构建问答链（LangGraph-only）。"""
-    from app.agents.langgraph_flow import build_langgraph_chain
+    from app.agents.langgraph import build_langgraph_chain
 
     return build_langgraph_chain(settings=settings, get_session_history=get_session_history)

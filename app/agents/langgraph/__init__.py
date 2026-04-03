@@ -1,3 +1,5 @@
+"""LangGraph runtime internals split from monolithic flow file."""
+
 from __future__ import annotations
 
 from typing import Callable
@@ -12,16 +14,7 @@ from app.agents.langgraph.history_compression import (
     _estimate_text_tokens,
     _history_token_limit,
 )
-from app.agents.langgraph.nodes import (
-    _assistant_node_factory,
-    _build_prompt_node_impl,
-    _finalize_node,
-    _knowledge_node,
-    _plan_node,
-    _should_call_tools,
-    _skill_planning_node,
-    _tools_node,
-)
+from app.agents.langgraph.nodes import _build_prompt_node_impl, _finalize_node
 from app.agents.langgraph.state import QAState
 from app.agents.langgraph.stream_adapter import StreamingLanggraphChain
 from app.agents.session_history import SessionHistory
@@ -31,7 +24,6 @@ from app.core.prompt_store import render_prompt
 
 
 def _build_prompt_node(state: QAState) -> QAState:
-    """Compatibility wrapper so tests can monkeypatch flow-level render helpers."""
     return _build_prompt_node_impl(
         state,
         render_prompt_fn=render_prompt,
@@ -43,7 +35,6 @@ def build_langgraph_chain(
     settings: Settings,
     get_session_history: Callable[[str], SessionHistory],
 ):
-    """Build chain via extracted factory while preserving historical import path."""
     load_dotenv()
     return build_langgraph_chain_impl(
         settings=settings,
@@ -54,9 +45,9 @@ def build_langgraph_chain(
 
 __all__ = [
     "build_langgraph_chain",
+    "build_langgraph_chain_impl",
     "StreamingLanggraphChain",
     "QAState",
-    "_build_prompt_node",
     "_finalize_node",
     "_compress_history_by_token_budget",
     "_compress_text_to_token_budget",
