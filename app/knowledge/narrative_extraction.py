@@ -6,15 +6,10 @@ import hashlib
 import json
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from app.agents.llm_client import ainvoke_model, invoke_model
 
 from app.config import get_settings
 from app.core.prompt_store import render_prompt
-
-try:
-    from langsmith import tracing_context
-except Exception:  # noqa: BLE001
-    tracing_context = None
 
 
 _NARRATIVE_CACHE: dict[str, dict[str, Any]] = {}
@@ -113,20 +108,14 @@ def _normalize_analysis_payload(payload: Any) -> dict[str, Any]:
 
 def _call_llm_for_analysis(content: str) -> dict[str, Any]:
     settings = get_settings()
-    model = ChatOpenAI(
-        model=settings.model_name,
-        temperature=0.0,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
 
     prompt = render_prompt("knowledge.narrative.single", content=content)
-
-    if tracing_context is not None:
-        with tracing_context(enabled=False):
-            response = model.invoke(prompt)
-    else:
-        response = model.invoke(prompt)
+    response = invoke_model(
+        settings=settings,
+        prompt_or_messages=prompt,
+        temperature=0.0,
+        disable_tracing=True,
+    )
 
     content_text = str(getattr(response, "content", response)).strip()
     if content_text.startswith("```json"):
@@ -147,12 +136,6 @@ def _call_llm_for_batch_analysis(contents: list[str]) -> list[dict[str, Any]]:
         return []
 
     settings = get_settings()
-    model = ChatOpenAI(
-        model=settings.model_name,
-        temperature=0.0,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
 
     # 构建批量提示词
     content_blocks = []
@@ -160,12 +143,12 @@ def _call_llm_for_batch_analysis(contents: list[str]) -> list[dict[str, Any]]:
         content_blocks.append(f"--- 文本段落 {i} ---\n{content}\n")
 
     prompt = render_prompt("knowledge.narrative.batch", content_blocks="".join(content_blocks))
-
-    if tracing_context is not None:
-        with tracing_context(enabled=False):
-            response = model.invoke(prompt)
-    else:
-        response = model.invoke(prompt)
+    response = invoke_model(
+        settings=settings,
+        prompt_or_messages=prompt,
+        temperature=0.0,
+        disable_tracing=True,
+    )
 
     content_text = str(getattr(response, "content", response)).strip()
     if content_text.startswith("```json"):
@@ -198,24 +181,18 @@ async def _call_llm_for_batch_analysis_async(contents: list[str]) -> list[dict[s
         return []
 
     settings = get_settings()
-    model = ChatOpenAI(
-        model=settings.model_name,
-        temperature=0.0,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
 
     content_blocks = []
     for i, content in enumerate(contents, 1):
         content_blocks.append(f"--- 文本段落 {i} ---\n{content}\n")
 
     prompt = render_prompt("knowledge.narrative.batch", content_blocks="".join(content_blocks))
-
-    if tracing_context is not None:
-        with tracing_context(enabled=False):
-            response = await model.ainvoke(prompt)
-    else:
-        response = await model.ainvoke(prompt)
+    response = await ainvoke_model(
+        settings=settings,
+        prompt_or_messages=prompt,
+        temperature=0.0,
+        disable_tracing=True,
+    )
 
     content_text = str(getattr(response, "content", response)).strip()
     if content_text.startswith("```json"):

@@ -56,7 +56,7 @@ def test_run_docker_command_uses_mcp_when_enabled(monkeypatch) -> None:
     monkeypatch.setenv("DOCKER_MCP_ENABLED", "true")
     clear_docker_exec_log()
     monkeypatch.setattr(
-        "app.agents.tools_docker_sandbox.call_docker_command_via_mcp",
+        "app.agents.tools.tools_docker_sandbox.call_docker_command_via_mcp",
         lambda command, timeout_seconds: "exit_code: 0\nstdout:\nmcp-ok\n\nstderr:\n(empty)",
     )
 

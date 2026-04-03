@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import re
 
-from langchain.tools import tool
-from app.agents.tools_docker_sandbox import _run_python_in_docker_impl
+from app.agents.tool_definition import ToolDefinition
+from app.agents.tools.tools_docker_sandbox import _run_python_in_docker_impl
 
 _MAX_PY_CODE_CHARS = 8000
 _MAX_TOOL_OUTPUT_CHARS = 6000
@@ -44,8 +44,7 @@ def _contains_dangerous_python(code: str) -> bool:
     return any(re.search(pattern, lowered) for pattern in deny_patterns)
 
 
-@tool
-def run_python_code(code: str) -> str:
+def _run_python_code_impl(code: str) -> str:
     """Execute Python code and return exit_code/stdout/stderr."""
     normalized = (code or "").strip()
     if not normalized:
@@ -66,6 +65,20 @@ def run_python_code(code: str) -> str:
     result = _run_python_in_docker_impl(normalized)
     record_python_exec(normalized, result)
     return result
+
+
+run_python_code = ToolDefinition(
+    name="run_python_code",
+    description="Execute Python code and return exit_code/stdout/stderr.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "code": {"type": "string"},
+        },
+        "required": ["code"],
+    },
+    handler=_run_python_code_impl,
+)
 
 
 __all__ = ["run_python_code", "get_python_exec_log", "clear_python_exec_log", "record_python_exec"]

@@ -8,7 +8,6 @@ from typing import Annotated
 from typing import TypedDict
 
 from dotenv import load_dotenv
-from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage
 from langchain_core.messages import AIMessageChunk
 from langchain_core.messages import BaseMessage
@@ -16,14 +15,14 @@ from langchain_core.messages import HumanMessage
 from langchain_core.messages import SystemMessage
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableLambda
-from langchain_core.runnables.history import RunnableWithMessageHistory
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-from langchain_openai import ChatOpenAI
 
+from app.agents.llm_client import create_chat_model, invoke_model
+from app.agents.tool_definition import parse_tool_arguments
 from app.agents.tool_registry import tool_registry
 from app.agents.stream_messages import StreamMessage, MessageType
+from app.agents.session_history import SessionHistory
 from app.agents.skills import (
     DEFAULT_SKILL_NAME,
     process_context_for_skill,
@@ -43,7 +42,7 @@ from app.config.langgraph import (
 )
 from app.config.execution import docker_workdir_mount
 from app.config.execution import llmlingua_mcp_enabled
-from app.agents.llmlingua_mcp_client import compress_text_via_llmlingua_mcp, compress_history_via_llmlingua_mcp
+from app.agents.mcp.llmlingua_client import compress_text_via_llmlingua_mcp, compress_history_via_llmlingua_mcp
 from app.config import get_settings
 from app.core.config import Settings
 from app.core.prompt_store import render_prompt
@@ -473,17 +472,13 @@ def _skill_planning_node(state: QAState) -> QAState:
 """
     
     try:
-        from langchain_openai import ChatOpenAI
-
         settings = get_settings()
-        model = ChatOpenAI(
-            model=settings.model_name,
+
+        response = invoke_model(
+            settings=settings,
+            prompt_or_messages=decision_prompt,
             temperature=0.3,
-            api_key=settings.api_key,
-            base_url=settings.base_url,
         )
-        
-        response = model.invoke(decision_prompt)
         content = str(getattr(response, "content", "") or "").strip()
         
         # Parse JSON response
@@ -591,7 +586,7 @@ def _assistant_node_factory(model_factory: Callable):
     """Create assistant node with dynamic tool binding based on skill.
     
     Args:
-        model_factory: Callable that returns a ChatOpenAI model.
+        model_factory: Callable that returns a chat model client.
                       Used to create models with skill-specific tools.
     """
     def _assistant_node(state: QAState) -> QAState:
@@ -604,10 +599,14 @@ def _assistant_node_factory(model_factory: Callable):
         
         # Determine which tools to bind
         filtered_tools = select_tools_for_skill(selected_skill_name)
+        filtered_tool_schemas = [
+            tool.to_openai_tool() if hasattr(tool, "to_openai_tool") else tool
+            for tool in filtered_tools
+        ]
         
         # Create model with skill-specific tools
         base_model = model_factory()
-        model_with_tools = base_model.bind_tools(filtered_tools)
+        model_with_tools = base_model.bind_tools(filtered_tool_schemas)
 
         stream_messages: list[StreamMessage] = []
 
@@ -669,6 +668,45 @@ def _should_call_tools(state: QAState) -> str:
     return "finalize"
 
 
+def _tools_node(state: QAState) -> QAState:
+    messages = state.get("messages", [])
+    if not isinstance(messages, list) or not messages:
+        return {"messages": []}
+
+    last = messages[-1]
+    tool_calls = getattr(last, "tool_calls", None) or []
+    if not tool_calls:
+        return {"messages": []}
+
+    tool_messages: list[ToolMessage] = []
+    for call in tool_calls:
+        tool_name = str(call.get("name", "") or "").strip()
+        call_id = str(call.get("id", "") or "").strip()
+        raw_args = call.get("args", {})
+
+        if not tool_name:
+            continue
+
+        tool = tool_registry.get_tool(tool_name)
+        if tool is None:
+            result = f"工具执行失败: 未找到工具 {tool_name}"
+        else:
+            try:
+                args = parse_tool_arguments(raw_args)
+                result = str(tool.invoke(args))
+            except Exception as exc:  # noqa: BLE001
+                result = f"工具执行失败: {exc}"
+
+        tool_messages.append(
+            ToolMessage(
+                content=result,
+                tool_call_id=call_id or f"missing_call_id_{tool_name}",
+            )
+        )
+
+    return {"messages": tool_messages}
+
+
 def _finalize_node(state: QAState) -> QAState:
     messages = state.get("messages", [])
     stream_messages = []
@@ -705,25 +743,13 @@ def _extract_answer(result: dict) -> str:
 
 def build_langgraph_chain(
     settings: Settings,
-    get_session_history: Callable[[str], BaseChatMessageHistory],
+    get_session_history: Callable[[str], SessionHistory],
 ):
     """Build a LangGraph-based QA chain with explicit routing and retrieval nodes."""
     load_dotenv()
 
-    model = ChatOpenAI(
-        model=settings.model_name,
-        temperature=settings.temperature,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
-
     # Create a model factory lambda that can be called at runtime to create fresh models
-    model_factory = lambda: ChatOpenAI(
-        model=settings.model_name,
-        temperature=settings.temperature,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
+    model_factory = lambda: create_chat_model(settings=settings)
 
     graph = StateGraph(QAState)
     graph.add_node("plan", RunnableLambda(_plan_node).with_config(_node_config("plan")))
@@ -739,7 +765,7 @@ def build_langgraph_chain(
     )
     graph.add_node(
         "tools",
-        ToolNode(tool_registry.get_all_tools()).with_config(_node_config("tools", ["tool-calls"])),
+        RunnableLambda(_tools_node).with_config(_node_config("tools", ["tool-calls"])),
     )
     graph.add_node("finalize", RunnableLambda(_finalize_node).with_config(_node_config("finalize")))
 
@@ -768,30 +794,11 @@ def build_langgraph_chain(
 
     compiled_graph = graph.compile().with_config(_graph_config())
 
-    base_chain = (
-        RunnableLambda(
-            lambda x: {
-                "question": str(x.get("question", "")),
-                "retrieved_context": str(x.get("retrieved_context", "")),
-                "history": x.get("history", []),
-            }
-        ).with_config(_node_config("input_adapter"))
-        | compiled_graph
-        | RunnableLambda(_extract_answer).with_config(_node_config("output_adapter"))
-    )
-
-    runtime_chain = RunnableWithMessageHistory(
-        base_chain,
-        get_session_history,
-        input_messages_key="question",
-        history_messages_key="history",
-    )
-
     # 返回支持流式的包装
     return StreamingLanggraphChain(
         compiled_graph, 
         compiled_graph,
-        runtime_chain,
+        None,
         get_session_history,
         _node_config
     )
@@ -806,10 +813,92 @@ class StreamingLanggraphChain:
         self._base_chain = base_chain
         self._session_history_getter = session_history_getter
         self._node_config_getter = node_config_getter
+
+    def _resolve_session_id(self, explicit_session_id: str | None, kwargs: dict) -> str | None:
+        if explicit_session_id:
+            return explicit_session_id
+
+        config = kwargs.get("config")
+        if isinstance(config, dict):
+            configurable = config.get("configurable")
+            if isinstance(configurable, dict):
+                value = configurable.get("session_id")
+                if value is not None:
+                    return str(value)
+        return None
+
+    def _load_history_messages(self, session_id: str | None, input_data: dict) -> tuple[SessionHistory | None, list[BaseMessage]]:
+        session_history = None
+        history_messages: list[BaseMessage] = []
+
+        if session_id:
+            try:
+                session_history = self._session_history_getter(session_id)
+                existing = getattr(session_history, "messages", [])
+                if isinstance(existing, list):
+                    history_messages.extend(m for m in existing if isinstance(m, BaseMessage))
+            except Exception:  # noqa: BLE001
+                session_history = None
+
+        provided_history = input_data.get("history", [])
+        if isinstance(provided_history, list):
+            history_messages.extend(m for m in provided_history if isinstance(m, BaseMessage))
+
+        return session_history, history_messages
+
+    def _build_state_input(self, input_data: dict, history_messages: list[BaseMessage]) -> dict:
+        return {
+            "question": str(input_data.get("question", "")),
+            "retrieved_context": str(input_data.get("retrieved_context", "")),
+            "history": history_messages,
+            "stream_messages": [],
+        }
+
+    def _extract_final_answer(self, final_state) -> str:
+        if isinstance(final_state, dict):
+            answer = str(final_state.get("answer", "") or "")
+            if answer.strip():
+                return answer
+
+            messages = final_state.get("messages", [])
+            if isinstance(messages, list):
+                for msg in reversed(messages):
+                    if isinstance(msg, AIMessage):
+                        return str(getattr(msg, "content", "") or "")
+        return ""
+
+    def _persist_session_history(self, session_history: SessionHistory | None, question: str, answer: str) -> None:
+        if session_history is None:
+            return
+
+        try:
+            to_add: list[BaseMessage] = []
+            normalized_question = str(question or "").strip()
+            normalized_answer = str(answer or "").strip()
+            if normalized_question:
+                to_add.append(HumanMessage(content=normalized_question))
+            if normalized_answer:
+                to_add.append(AIMessage(content=normalized_answer))
+            if to_add:
+                session_history.add_messages(to_add)
+        except Exception:  # noqa: BLE001
+            pass
     
     def invoke(self, input_data: dict, **kwargs) -> str:
-        """同步调用，返回最终答案。代理给base_chain.invoke()。"""
-        return self._base_chain.invoke(input_data, **kwargs)
+        """同步调用，返回最终答案（LangGraph 原生执行路径）。"""
+        session_id = self._resolve_session_id(None, kwargs)
+        session_history, history_messages = self._load_history_messages(session_id, input_data)
+        state_input = self._build_state_input(input_data, history_messages)
+
+        final_state = self._graph.invoke(state_input, config=kwargs.get("config"))
+        answer = self._extract_final_answer(final_state)
+
+        self._persist_session_history(
+            session_history=session_history,
+            question=str(input_data.get("question", "") or ""),
+            answer=answer,
+        )
+        return answer
     
     def stream(self, input_data: dict, session_id: str | None = None, **kwargs):
         """流式调用，逐步返回StreamMessage对象。
@@ -823,33 +912,9 @@ class StreamingLanggraphChain:
             StreamMessage对象，表示各个处理步骤的中间结果
         """
         # 从kwargs中提取session_id（如果提供的话从config中）
-        if not session_id and "config" in kwargs:
-            config = kwargs["config"]
-            if isinstance(config, dict) and "configurable" in config:
-                session_id = config["configurable"].get("session_id")
-
-        session_history = None
-        history_messages: list[BaseMessage] = []
-        if session_id:
-            try:
-                session_history = self._session_history_getter(session_id)
-                existing = getattr(session_history, "messages", [])
-                if isinstance(existing, list):
-                    history_messages.extend(m for m in existing if isinstance(m, BaseMessage))
-            except Exception:  # noqa: BLE001
-                session_history = None
-
-        provided_history = input_data.get("history", [])
-        if isinstance(provided_history, list):
-            history_messages.extend(m for m in provided_history if isinstance(m, BaseMessage))
-        
-        # 准备输入状态
-        state_input = {
-            "question": str(input_data.get("question", "")),
-            "retrieved_context": str(input_data.get("retrieved_context", "")),
-            "history": history_messages,
-            "stream_messages": [],
-        }
+        session_id = self._resolve_session_id(session_id, kwargs)
+        session_history, history_messages = self._load_history_messages(session_id, input_data)
+        state_input = self._build_state_input(input_data, history_messages)
         
         # 流式执行graph，收集中间消息
         collected_messages = []
@@ -1020,19 +1085,11 @@ class StreamingLanggraphChain:
         elif final_state and "answer" in final_state:
             final_answer_text = str(final_state.get("answer", "") or "")
 
-        # stream模式不会经过RunnableWithMessageHistory，需手动回写短期会话历史。
-        if session_history is not None:
-            try:
-                question = str(input_data.get("question", "")).strip()
-                to_add: list[BaseMessage] = []
-                if question:
-                    to_add.append(HumanMessage(content=question))
-                if final_answer_text.strip():
-                    to_add.append(AIMessage(content=final_answer_text))
-                if to_add:
-                    session_history.add_messages(to_add)
-            except Exception:  # noqa: BLE001
-                pass
+        self._persist_session_history(
+            session_history=session_history,
+            question=str(input_data.get("question", "") or ""),
+            answer=final_answer_text,
+        )
 
         # 确保至少返回一个最终答案消息
         if final_state and "answer" in final_state and not saw_token_delta:

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from langchain.tools import tool
-from app.agents.docker_mcp_client import call_docker_command_via_mcp, call_python_in_docker_via_mcp
+from app.agents.mcp.docker_client import call_docker_command_via_mcp, call_python_in_docker_via_mcp
+from app.agents.tool_definition import ToolDefinition
 from app.config.execution import docker_mcp_enabled
 from app.sandbox.docker_runner import execute_docker_shell, execute_python_in_docker
 
@@ -24,8 +24,7 @@ def record_docker_exec(mode: str, command: str, result: str) -> None:
     _docker_exec_log.append({"mode": mode, "command": command, "result": result})
 
 
-@tool
-def run_docker_command(command: str, timeout_seconds: int = 30) -> str:
+def _run_docker_command_tool(command: str, timeout_seconds: int = 30) -> str:
     """在 Docker 沙箱中执行 shell 命令（高风险操作优先使用）。
 
     Args:
@@ -59,8 +58,7 @@ def _run_docker_command_impl(command: str, timeout_seconds: int = 30) -> str:
     return result
 
 
-@tool
-def run_python_in_docker(code: str, timeout_seconds: int = 30) -> str:
+def _run_python_in_docker_tool(code: str, timeout_seconds: int = 30) -> str:
     """在 Docker 沙箱中执行 Python 代码进行精确计算与逻辑验证。
 
     Args:
@@ -93,6 +91,36 @@ def _run_python_in_docker_impl(code: str, timeout_seconds: int = 30) -> str:
         result = execute_python_in_docker(code=normalized, timeout_seconds=timeout_seconds)
     record_docker_exec("python", normalized, result)
     return result
+
+
+run_docker_command = ToolDefinition(
+    name="run_docker_command",
+    description="在 Docker 沙箱中执行 shell 命令并返回 exit_code/stdout/stderr。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "timeout_seconds": {"type": "integer", "default": 30},
+        },
+        "required": ["command"],
+    },
+    handler=_run_docker_command_tool,
+)
+
+
+run_python_in_docker = ToolDefinition(
+    name="run_python_in_docker",
+    description="在 Docker 沙箱中执行 Python 代码并返回 exit_code/stdout/stderr。",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "code": {"type": "string"},
+            "timeout_seconds": {"type": "integer", "default": 30},
+        },
+        "required": ["code"],
+    },
+    handler=_run_python_in_docker_tool,
+)
 
 
 __all__ = [

@@ -1,4 +1,4 @@
-from app.agents.tools_web_search import _build_query_variants
+from app.agents.tools.tools_web_search import _build_query_variants
 
 
 def test_build_query_variants_keeps_base_first() -> None:

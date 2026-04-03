@@ -7,8 +7,8 @@ import json
 import os
 from typing import Any
 
-from langchain.tools import tool
-from langchain_openai import ChatOpenAI
+from app.agents.llm_client import invoke_model
+from app.agents.tool_definition import ToolDefinition
 
 from app.config import get_settings
 from app.core.prompt_store import render_prompt
@@ -27,12 +27,6 @@ from app.knowledge.pgvector_store import PgVectorKnowledgeStore
 
 _knowledge_retrieval_log: list[dict] = []
 _query_analysis_cache: dict[str, dict[str, Any]] = {}
-
-try:
-    from langsmith import tracing_context
-except Exception:  # noqa: BLE001
-    tracing_context = None
-
 
 def get_knowledge_retrieval_log() -> list[dict]:
     """Return a copy of current turn knowledge retrieval log."""
@@ -82,12 +76,6 @@ def _build_query_analysis_fallback(query: str, candidate_characters: list[str]) 
 
 def _analyze_query_with_llm(query: str, candidate_characters: list[str]) -> dict[str, Any]:
     settings = get_settings()
-    model = ChatOpenAI(
-        model=settings.model_name,
-        temperature=0.0,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
 
     candidate_text = ", ".join(candidate_characters[:80]) if candidate_characters else "(none)"
     prompt = render_prompt(
@@ -96,11 +84,12 @@ def _analyze_query_with_llm(query: str, candidate_characters: list[str]) -> dict
         candidate_text=candidate_text,
     )
 
-    if tracing_context is not None:
-        with tracing_context(enabled=False):
-            response = model.invoke(prompt)
-    else:
-        response = model.invoke(prompt)
+    response = invoke_model(
+        settings=settings,
+        prompt_or_messages=prompt,
+        temperature=0.0,
+        disable_tracing=True,
+    )
     content = str(getattr(response, "content", response)).strip()
     if content.startswith("```json"):
         content = content[7:]
@@ -254,12 +243,6 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> tuple[lis
         return [], {}
 
     settings = get_settings()
-    model = ChatOpenAI(
-        model=settings.model_name,
-        temperature=0.0,
-        api_key=settings.api_key,
-        base_url=settings.base_url,
-    )
 
     candidates: list[str] = []
     for idx, hit in enumerate(hits, start=1):
@@ -290,11 +273,12 @@ def _rerank_hits_with_llm(query: str, hits: list[dict], top_k: int) -> tuple[lis
         candidates="\n\n".join(candidates),
     )
 
-    if tracing_context is not None:
-        with tracing_context(enabled=False):
-            response = model.invoke(prompt)
-    else:
-        response = model.invoke(prompt)
+    response = invoke_model(
+        settings=settings,
+        prompt_or_messages=prompt,
+        temperature=0.0,
+        disable_tracing=True,
+    )
     content = str(getattr(response, "content", response)).strip()
     if content.startswith("```json"):
         content = content[7:]
@@ -412,8 +396,7 @@ def _format_hits(store: PgVectorKnowledgeStore, hits: list[dict], max_items: int
     return "\n\n".join(lines)
 
 
-@tool
-def retrieve_pg_knowledge(
+def _retrieve_pg_knowledge_impl(
     query: str,
     top_k: int = 0,
     book_id: str = "",
@@ -550,6 +533,25 @@ def retrieve_pg_knowledge(
         result = f"知识检索失败: {exc}"
         record_knowledge_retrieval(clean_query, result)
         return result
+
+
+retrieve_pg_knowledge = ToolDefinition(
+    name="retrieve_pg_knowledge",
+    description="Retrieve relevant chunks from PostgreSQL + pgvector knowledge base.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "top_k": {"type": "integer", "default": 0},
+            "book_id": {"type": "string", "default": ""},
+            "chapter": {"type": "string", "default": ""},
+            "context_window": {"type": "integer", "default": -1},
+            "rerank_candidates": {"type": "integer", "default": 0},
+        },
+        "required": ["query"],
+    },
+    handler=_retrieve_pg_knowledge_impl,
+)
 
 
 __all__ = [

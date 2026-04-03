@@ -13,12 +13,14 @@ from app.config.execution import (
 
 
 def test_llmlingua_defaults(monkeypatch) -> None:
-    monkeypatch.delenv("LLMLINGUA_MCP_ENABLED", raising=False)
-    monkeypatch.delenv("LLMLINGUA_MCP_SERVER_URL", raising=False)
-    monkeypatch.delenv("LLMLINGUA_MCP_TIMEOUT", raising=False)
-    monkeypatch.delenv("LLMLINGUA_MODEL_NAME", raising=False)
-    monkeypatch.delenv("LLMLINGUA_MODEL_PATH", raising=False)
-    monkeypatch.delenv("LLMLINGUA_SHARED_SERVER", raising=False)
+    # Use empty values (instead of delenv) so load_dotenv() will not repopulate
+    # these keys from a local .env during test execution.
+    monkeypatch.setenv("LLMLINGUA_MCP_ENABLED", "")
+    monkeypatch.setenv("LLMLINGUA_MCP_SERVER_URL", "")
+    monkeypatch.setenv("LLMLINGUA_MCP_TIMEOUT", "")
+    monkeypatch.setenv("LLMLINGUA_MODEL_NAME", "")
+    monkeypatch.setenv("LLMLINGUA_MODEL_PATH", "")
+    monkeypatch.setenv("LLMLINGUA_SHARED_SERVER", "")
 
     assert llmlingua_mcp_enabled() is True
     assert llmlingua_mcp_server_url() == "http://127.0.0.1:8765/mcp"

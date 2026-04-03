@@ -10,7 +10,7 @@ from types import ModuleType
 def _iter_tool_modules() -> list[ModuleType]:
     """Discover and import all sibling modules matching tools_*.py."""
     modules: list[ModuleType] = []
-    package_name = __name__.rsplit(".", 1)[0]
+    package_name = __name__
     package = importlib.import_module(package_name)
     package_path = getattr(package, "__path__", None)
     if package_path is None:

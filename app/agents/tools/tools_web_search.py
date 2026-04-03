@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from langchain.tools import tool
+from app.agents.tool_definition import ToolDefinition
 
 # Save all searches in current turn for GUI display.
 _search_log: list[dict] = []
@@ -173,8 +173,7 @@ def _format_items(items: list[dict], max_items: int = 6) -> str:
     return "\n".join(lines)
 
 
-@tool
-def web_search(query: str) -> str:
+def _web_search_impl(query: str) -> str:
     """Search the web for real-time information using DuckDuckGo.
 
     Args:
@@ -243,6 +242,20 @@ def web_search(query: str) -> str:
         error_msg = f"搜索出错: {str(e)}"
         record_search(query, error_msg)
         return error_msg
+
+
+web_search = ToolDefinition(
+    name="web_search",
+    description="Search the web for real-time information using DuckDuckGo.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+        },
+        "required": ["query"],
+    },
+    handler=_web_search_impl,
+)
 
 
 __all__ = ["web_search", "get_search_log", "clear_search_log", "record_search"]

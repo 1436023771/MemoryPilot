@@ -3,12 +3,12 @@ from app.agents.tools import (
     get_knowledge_retrieval_log,
     retrieve_pg_knowledge,
 )
-from app.agents.tools_pg_knowledge import _analyze_query_with_cache, _apply_role_timeline_rerank
+from app.agents.tools.tools_pg_knowledge import _analyze_query_with_cache, _apply_role_timeline_rerank
 
 
 def test_retrieve_pg_knowledge_requires_dsn(monkeypatch) -> None:
     clear_knowledge_retrieval_log()
-    monkeypatch.setattr("app.agents.tools_pg_knowledge.resolve_pg_dsn", lambda _dsn: "")
+    monkeypatch.setattr("app.agents.tools.tools_pg_knowledge.resolve_pg_dsn", lambda _dsn: "")
 
     result = retrieve_pg_knowledge.invoke({"query": "项目的记忆机制是什么"})
 
@@ -95,7 +95,7 @@ def test_query_analysis_cache_reuses_first_result(monkeypatch) -> None:
         }
 
     clear_knowledge_retrieval_log()
-    monkeypatch.setattr("app.agents.tools_pg_knowledge._analyze_query_with_llm", _fake_llm)
+    monkeypatch.setattr("app.agents.tools.tools_pg_knowledge._analyze_query_with_llm", _fake_llm)
 
     a = _analyze_query_with_cache("张三后来做了什么", "book-a", ["张三", "李四"])
     b = _analyze_query_with_cache("张三后来做了什么", "book-a", ["张三", "李四", "王五"])
