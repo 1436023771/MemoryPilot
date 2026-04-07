@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 from app.agents.llm_client import invoke_model
+from app.agents.mcp.reading_companion_client import retrieve_reading_context_via_mcp
 from app.agents.tool_definition import ToolDefinition
 
 from app.config import get_settings
@@ -21,6 +22,7 @@ from app.config.knowledge import (
     context_window_default,
     rerank_candidates_default,
 )
+from app.config.execution import reading_companion_mcp_enabled
 from app.knowledge.embeddings import embed_texts_sentence_transformers
 from app.knowledge.pg_env import resolve_pg_dsn
 from app.knowledge.pgvector_store import PgVectorKnowledgeStore
@@ -535,6 +537,44 @@ def _retrieve_pg_knowledge_impl(
         return result
 
 
+def _retrieve_pg_knowledge_tool(
+    query: str,
+    top_k: int = 0,
+    book_id: str = "",
+    chapter: str = "",
+    context_window: int = -1,
+    rerank_candidates: int = 0,
+) -> str:
+    if not reading_companion_mcp_enabled():
+        return _retrieve_pg_knowledge_impl(
+            query=query,
+            top_k=top_k,
+            book_id=book_id,
+            chapter=chapter,
+            context_window=context_window,
+            rerank_candidates=rerank_candidates,
+        )
+
+    result = retrieve_reading_context_via_mcp(
+        query=query,
+        top_k=top_k,
+        book_id=book_id,
+        chapter=chapter,
+        context_window=context_window,
+        rerank_candidates=rerank_candidates,
+    )
+    if str(result).startswith("Reading Companion MCP 调用失败"):
+        return _retrieve_pg_knowledge_impl(
+            query=query,
+            top_k=top_k,
+            book_id=book_id,
+            chapter=chapter,
+            context_window=context_window,
+            rerank_candidates=rerank_candidates,
+        )
+    return result
+
+
 retrieve_pg_knowledge = ToolDefinition(
     name="retrieve_pg_knowledge",
     description="Retrieve relevant chunks from PostgreSQL + pgvector knowledge base.",
@@ -550,7 +590,7 @@ retrieve_pg_knowledge = ToolDefinition(
         },
         "required": ["query"],
     },
-    handler=_retrieve_pg_knowledge_impl,
+    handler=_retrieve_pg_knowledge_tool,
 )
 
 

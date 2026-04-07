@@ -103,3 +103,28 @@ def test_query_analysis_cache_reuses_first_result(monkeypatch) -> None:
     assert calls["n"] == 1
     assert a == b
     assert a["characters"] == ["张三"]
+
+
+def test_retrieve_pg_knowledge_uses_reading_companion_mcp_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("READING_COMPANION_MCP_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.agents.tools.tools_pg_knowledge.retrieve_reading_context_via_mcp",
+        lambda **kwargs: f"mcp-ok:{kwargs['query']}",
+    )
+
+    result = retrieve_pg_knowledge.invoke({"query": "张三后来如何"})
+
+    assert result == "mcp-ok:张三后来如何"
+
+
+def test_retrieve_pg_knowledge_fallbacks_to_local_when_mcp_fails(monkeypatch) -> None:
+    monkeypatch.setenv("READING_COMPANION_MCP_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.agents.tools.tools_pg_knowledge.retrieve_reading_context_via_mcp",
+        lambda **_kwargs: "Reading Companion MCP 调用失败: timeout",
+    )
+    monkeypatch.setattr("app.agents.tools.tools_pg_knowledge.resolve_pg_dsn", lambda _dsn: "")
+
+    result = retrieve_pg_knowledge.invoke({"query": "项目的记忆机制是什么"})
+
+    assert "缺少数据库连接配置" in result

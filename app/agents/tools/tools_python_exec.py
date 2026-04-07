@@ -57,11 +57,6 @@ def _run_python_code_impl(code: str) -> str:
         record_python_exec(normalized, result)
         return result
 
-    if _contains_dangerous_python(normalized):
-        result = "Python 执行失败: 检测到危险破坏模式（如根目录删除/伪终端滥用），已拒绝执行"
-        record_python_exec(normalized, result)
-        return result
-
     result = _run_python_in_docker_impl(normalized)
     record_python_exec(normalized, result)
     return result

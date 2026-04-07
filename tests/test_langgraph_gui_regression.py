@@ -1,12 +1,12 @@
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.agents.langgraph_flow import StreamingLanggraphChain, _finalize_node
-from app.agents.langgraph_flow import _build_prompt_node
-from app.agents.langgraph_flow import _compress_history_by_token_budget
-from app.agents.langgraph_flow import _compress_text_to_token_budget
-from app.agents.langgraph_flow import _estimate_message_tokens
-from app.agents.langgraph_flow import _estimate_text_tokens
+from app.agents.langgraph import StreamingLanggraphChain, _finalize_node
+from app.agents.langgraph import _build_prompt_node
+from app.agents.langgraph import _compress_history_by_token_budget
+from app.agents.langgraph import _compress_text_to_token_budget
+from app.agents.langgraph import _estimate_message_tokens
+from app.agents.langgraph import _estimate_text_tokens
 
 
 def test_finalize_returns_answer_and_stream_messages() -> None:
@@ -182,8 +182,8 @@ def test_build_prompt_uses_general_prompt_for_direct_route(monkeypatch) -> None:
         seen["key"] = key
         return f"PROMPT::{key}"
 
-    monkeypatch.setattr("app.agents.langgraph_flow.render_prompt", _fake_render)
-    monkeypatch.setattr("app.agents.langgraph_flow.docker_workdir_mount", lambda: None)
+    monkeypatch.setattr("app.agents.langgraph.render_prompt", _fake_render)
+    monkeypatch.setattr("app.agents.langgraph.docker_workdir_mount", lambda: None)
 
     result = _build_prompt_node(
         {
@@ -207,8 +207,8 @@ def test_build_prompt_uses_reading_prompt_for_knowledge_route(monkeypatch) -> No
         seen["key"] = key
         return f"PROMPT::{key}"
 
-    monkeypatch.setattr("app.agents.langgraph_flow.render_prompt", _fake_render)
-    monkeypatch.setattr("app.agents.langgraph_flow.docker_workdir_mount", lambda: None)
+    monkeypatch.setattr("app.agents.langgraph.render_prompt", _fake_render)
+    monkeypatch.setattr("app.agents.langgraph.docker_workdir_mount", lambda: None)
 
     result = _build_prompt_node(
         {

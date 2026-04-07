@@ -78,7 +78,7 @@ def _prepare_mount_dir() -> Path:
     return Path(tempfile.mkdtemp(prefix="agent_docker_workspace_"))
 
 
-def execute_docker_shell(command: str, timeout_seconds: int = 30) -> str:
+def execute_docker_shell(command: str, timeout_seconds: int = 30, *, skip_dangerous_check: bool = False) -> str:
     normalized = (command or "").strip()
     if not docker_sandbox_enabled():
         return "Docker 执行失败: DOCKER_SANDBOX_ENABLED=false，沙箱未启用"
@@ -90,7 +90,7 @@ def execute_docker_shell(command: str, timeout_seconds: int = 30) -> str:
     if len(normalized) > max_chars:
         return f"Docker 执行失败: 命令过长（>{max_chars} 字符）"
 
-    if _contains_dangerous_shell(normalized):
+    if not skip_dangerous_check and _contains_dangerous_shell(normalized):
         return "Docker 执行失败: 检测到被禁止的高危命令"
 
     timeout_value = max(5, int(timeout_seconds or docker_exec_timeout_seconds()))

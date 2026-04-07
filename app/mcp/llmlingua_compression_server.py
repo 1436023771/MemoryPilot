@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 import re
 from pathlib import Path
 from typing import Any
+
+from app.config import get_env_float, get_env_str
 
 try:
     _fastmcp_mod = importlib.import_module("mcp.server.fastmcp")
@@ -27,12 +28,12 @@ def _workspace_root() -> Path:
 
 
 def _env_model_name() -> str:
-    raw = os.getenv("LLMLINGUA_MODEL_NAME", "Qwen/Qwen2-1.5B-Instruct").strip()
+    raw = get_env_str("LLMLINGUA_MODEL_NAME", "Qwen/Qwen2-1.5B-Instruct")
     return raw or "Qwen/Qwen2-1.5B-Instruct"
 
 
 def _env_model_path() -> Path:
-    raw = os.getenv("LLMLINGUA_MODEL_PATH", "./models/qwen-1.5b").strip() or "./models/qwen-1.5b"
+    raw = get_env_str("LLMLINGUA_MODEL_PATH", "./models/qwen-1.5b") or "./models/qwen-1.5b"
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = _workspace_root() / path
@@ -40,11 +41,7 @@ def _env_model_path() -> Path:
 
 
 def _env_compression_rate() -> float:
-    raw = os.getenv("LLMLINGUA_COMPRESSION_RATE", "0.5").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        value = 0.5
+    value = get_env_float("LLMLINGUA_COMPRESSION_RATE", default=0.5)
     return max(0.1, min(0.9, value))
 
 

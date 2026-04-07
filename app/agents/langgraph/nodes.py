@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime
 from typing import Callable
 
@@ -28,6 +30,85 @@ from app.agents.tool_registry import tool_registry
 from app.config import get_settings
 from app.config.langgraph import context_window_default, rerank_candidates_default, top_k_default
 from app.core.prompt_store import render_prompt
+
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_selected_skill_from_response(content: str) -> str | None:
+    """Extract selected_skill from model output with robust JSON parsing.
+
+    Strategy:
+    1) Try strict JSON decode on full text.
+    2) If that fails, scan for JSON objects and decode each candidate with raw_decode.
+    3) Return the first non-empty selected_skill string found.
+    """
+    text = str(content or "").strip()
+    if not text:
+        return None
+
+    decoder = json.JSONDecoder()
+
+    # Preferred path: model returned strict JSON only.
+    try:
+        parsed = decoder.decode(text)
+        if isinstance(parsed, dict):
+            value = parsed.get("selected_skill")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback path: model wrapped JSON with extra commentary.
+    for idx, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(parsed, dict):
+            continue
+
+        value = parsed.get("selected_skill")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
+
+
+def _safe_invoke_tool(tool_name: str, raw_args: object) -> str:
+    """Invoke tool with explicit parse/execute error handling."""
+    tool = tool_registry.get_tool(tool_name)
+    if tool is None:
+        return f"工具执行失败: 未找到工具 {tool_name}"
+
+    try:
+        args = parse_tool_arguments(raw_args)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Tool argument parse failed; tool=%s raw_args_type=%s err=%s",
+            tool_name,
+            type(raw_args).__name__,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return f"工具执行失败: 参数解析失败 ({type(exc).__name__}: {exc})"
+
+    try:
+        return str(tool.invoke(args))
+    except (RuntimeError, ValueError, TypeError, OSError, TimeoutError) as exc:
+        logger.warning(
+            "Tool invoke recoverable error; tool=%s err=%s",
+            tool_name,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return f"工具执行失败: {type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Tool invoke unexpected error; tool=%s", tool_name)
+        return f"工具执行失败: {type(exc).__name__}: {exc}"
 
 
 def _plan_node(state: QAState) -> QAState:
@@ -70,24 +151,25 @@ def _skill_planning_node(state: QAState) -> QAState:
         )
         content = str(getattr(response, "content", "") or "").strip()
 
-        import json
-        import re
-        try:
-            json_match = re.search(r"\{.*\}", content, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                selected_skill = str(result.get("selected_skill", DEFAULT_SKILL_NAME)).strip()
-            else:
-                selected_skill = DEFAULT_SKILL_NAME
-        except (json.JSONDecodeError, ValueError):
+        selected_skill = _extract_selected_skill_from_response(content)
+        if not selected_skill:
+            logger.warning(
+                "Skill planning JSON parse failed, fallback to default; content_len=%s",
+                len(content),
+            )
             selected_skill = DEFAULT_SKILL_NAME
 
         return {"selected_skill": resolve_skill_name(selected_skill)}
 
-    except Exception as e:
-        import logging
-
-        logging.warning(f"Skill planning error: {e}, falling back to general")
+    except (RuntimeError, ValueError, TypeError, KeyError) as exc:
+        logger.warning(
+            "Skill planning recoverable error, fallback to default; err=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return {"selected_skill": DEFAULT_SKILL_NAME}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Skill planning unexpected error, fallback to default")
         return {"selected_skill": DEFAULT_SKILL_NAME}
 
 
@@ -116,7 +198,16 @@ def _knowledge_node(state: QAState) -> QAState:
         )
         messages.append(StreamMessage.progress("知识库检索完成"))
         return {"knowledge_context": compressed_retrieved, "stream_messages": messages}
+    except (RuntimeError, ValueError, TypeError, OSError, TimeoutError) as exc:
+        logger.warning(
+            "Knowledge retrieval recoverable error; err=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        messages.append(StreamMessage.error(f"知识检索失败: {exc}"))
+        return {"knowledge_context": f"知识检索失败: {exc}", "stream_messages": messages}
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Knowledge retrieval unexpected error")
         messages.append(StreamMessage.error(f"知识检索失败: {exc}"))
         return {"knowledge_context": f"知识检索失败: {exc}", "stream_messages": messages}
 
@@ -198,7 +289,15 @@ def _assistant_node_factory(model_factory: Callable):
                     merged_chunk = chunk
                 else:
                     merged_chunk = merged_chunk + chunk
-        except Exception:  # noqa: BLE001
+        except (RuntimeError, ValueError, TypeError, OSError, TimeoutError) as exc:
+            logger.warning(
+                "Model stream failed, fallback to invoke; err=%s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            merged_chunk = None
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Model stream unexpected error, fallback to invoke")
             merged_chunk = None
 
         if merged_chunk is None:
@@ -264,15 +363,7 @@ def _tools_node(state: QAState) -> QAState:
         if not tool_name:
             continue
 
-        tool = tool_registry.get_tool(tool_name)
-        if tool is None:
-            result = f"工具执行失败: 未找到工具 {tool_name}"
-        else:
-            try:
-                args = parse_tool_arguments(raw_args)
-                result = str(tool.invoke(args))
-            except Exception as exc:  # noqa: BLE001
-                result = f"工具执行失败: {exc}"
+        result = _safe_invoke_tool(tool_name, raw_args)
 
         tool_messages.append(
             ToolMessage(
@@ -322,4 +413,5 @@ __all__ = [
     "_tools_node",
     "_finalize_node",
     "_extract_answer",
+    "_extract_selected_skill_from_response",
 ]

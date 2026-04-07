@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import app.agents.command_guard as command_guard
 from app.agents.mcp.docker_client import call_docker_command_via_mcp, call_python_in_docker_via_mcp
 from app.agents.tool_definition import ToolDefinition
 from app.config.execution import docker_mcp_enabled
@@ -47,13 +48,35 @@ def _run_docker_command_tool(command: str, timeout_seconds: int = 30) -> str:
 def _run_docker_command_impl(command: str, timeout_seconds: int = 30) -> str:
     """Internal implementation of run_docker_command."""
     normalized = (command or "").strip()
+    lowered = normalized.lower()
+    approved_high_risk = False
+    if normalized and (
+        "mount" in lowered
+        or "umount" in lowered
+        or "mkfs" in lowered
+        or "dd if=" in lowered
+        or ":() { :|: & };:" in lowered
+    ):
+        approved_high_risk = command_guard.request_command_review("shell", normalized, "检测到高风险 shell 命令模式")
+        if approved_high_risk is False:
+            result = "Docker 执行已拦截: 用户选择阻止执行该命令"
+            record_docker_exec("shell", normalized, result)
+            return result
+
     if docker_mcp_enabled():
-        result = call_docker_command_via_mcp(command=normalized, timeout_seconds=timeout_seconds)
-        # Keep local path as resilience fallback when MCP server/command is unavailable.
-        if str(result).startswith("MCP 调用失败"):
-            result = execute_docker_shell(command=normalized, timeout_seconds=timeout_seconds)
+        if approved_high_risk:
+            result = execute_docker_shell(command=normalized, timeout_seconds=timeout_seconds, skip_dangerous_check=True)
+        else:
+            result = call_docker_command_via_mcp(command=normalized, timeout_seconds=timeout_seconds)
+            # Keep local path as resilience fallback when MCP server/command is unavailable.
+            if str(result).startswith("MCP 调用失败"):
+                result = execute_docker_shell(command=normalized, timeout_seconds=timeout_seconds)
     else:
-        result = execute_docker_shell(command=normalized, timeout_seconds=timeout_seconds)
+        result = execute_docker_shell(
+            command=normalized,
+            timeout_seconds=timeout_seconds,
+            skip_dangerous_check=approved_high_risk,
+        )
     record_docker_exec("shell", normalized, result)
     return result
 
@@ -83,6 +106,19 @@ def _run_python_in_docker_tool(code: str, timeout_seconds: int = 30) -> str:
 def _run_python_in_docker_impl(code: str, timeout_seconds: int = 30) -> str:
     """Internal implementation of run_python_in_docker."""
     normalized = (code or "").strip()
+    lowered = normalized.lower()
+    if normalized and (
+        "pty." in lowered
+        or "shutil.rmtree(" in lowered
+        or "os.remove(" in lowered
+        or "os.rmdir(" in lowered
+        or ("pathlib.path(" in lowered and ".rmdir(" in lowered)
+    ):
+        if command_guard.request_command_review("python", normalized, "检测到危险破坏模式（如根目录删除/伪终端滥用）") is False:
+            result = "Python 执行已拦截: 用户选择阻止执行该代码"
+            record_docker_exec("python", normalized, result)
+            return result
+
     if docker_mcp_enabled():
         result = call_python_in_docker_via_mcp(code=normalized, timeout_seconds=timeout_seconds)
         if str(result).startswith("MCP 调用失败"):

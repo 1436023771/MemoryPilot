@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-from dotenv import load_dotenv
-
 from app.agents.langgraph.factory import build_langgraph_chain_impl
 from app.agents.langgraph.history_compression import (
     _compress_history_by_token_budget,
@@ -35,7 +33,6 @@ def build_langgraph_chain(
     settings: Settings,
     get_session_history: Callable[[str], SessionHistory],
 ):
-    load_dotenv()
     return build_langgraph_chain_impl(
         settings=settings,
         get_session_history=get_session_history,

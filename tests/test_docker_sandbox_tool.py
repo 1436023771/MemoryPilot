@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
+import app.agents.command_guard as command_guard
 from app.agents.tools import clear_docker_exec_log, get_docker_exec_log, run_docker_command
 
 
@@ -20,13 +21,38 @@ def test_run_docker_command_requires_enable_flag(monkeypatch) -> None:
 def test_run_docker_command_blocks_dangerous_shell(monkeypatch) -> None:
     monkeypatch.setenv("DOCKER_SANDBOX_ENABLED", "true")
     clear_docker_exec_log()
+    monkeypatch.setattr(command_guard, "request_command_review", lambda *args, **kwargs: False)
 
     result = run_docker_command.invoke({"command": "mount -t tmpfs tmpfs /mnt"})
 
-    assert "被禁止" in result
+    assert "已拦截" in result
     logs = get_docker_exec_log()
     assert len(logs) == 1
     assert "mount" in logs[0]["command"]
+
+
+def test_run_docker_command_allows_after_confirmation(monkeypatch) -> None:
+    monkeypatch.setenv("DOCKER_SANDBOX_ENABLED", "true")
+    clear_docker_exec_log()
+    monkeypatch.setattr(command_guard, "request_command_review", lambda *args, **kwargs: True)
+
+    def _fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="approved\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("app.sandbox.docker_runner.subprocess.run", _fake_run)
+
+    result = run_docker_command.invoke({"command": "mount -t tmpfs tmpfs /mnt"})
+
+    assert "exit_code: 0" in result
+    assert "approved" in result
+    logs = get_docker_exec_log()
+    assert len(logs) == 1
+    assert logs[0]["mode"] == "shell"
 
 
 def test_run_docker_command_success(monkeypatch) -> None:

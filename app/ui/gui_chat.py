@@ -6,8 +6,7 @@ import threading
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 
-from dotenv import load_dotenv
-
+from app.agents.command_guard import CommandReviewRequest, register_command_review_handler
 from app.agents.chains import build_qa_chain
 from app.agents.chains import get_session_history
 from app.agents.stream_messages import StreamMessage, MessageType
@@ -38,9 +37,6 @@ class ChatWindow:
     """简单桌面对话窗口，默认启用长短期记忆。"""
 
     def __init__(self) -> None:
-        # Ensure .env values are available before reading GUI runtime flags.
-        load_dotenv()
-
         self.session_id = "gui-default"
         self.use_rag = True
         self.write_memory = True
@@ -73,6 +69,7 @@ class ChatWindow:
         self.root.configure(bg="#eef2f6")
 
         self._build_layout()
+        register_command_review_handler(self._review_command_execution)
 
     def _build_layout(self) -> None:
         container = ttk.Frame(self.root, padding=12)
@@ -225,6 +222,64 @@ class ChatWindow:
         else:
             self.runtime_chip.configure(bg="#eaf7ea", highlightbackground="#9cc69c")
             self.runtime_status.configure(bg="#eaf7ea", fg="#1f6b2a")
+
+    def _review_command_execution(self, request: CommandReviewRequest) -> bool:
+        """在主线程弹出确认窗口，返回是否允许执行。"""
+        decision: dict[str, bool] = {}
+        done = threading.Event()
+
+        def _show_dialog() -> None:
+            self._set_runtime_status("等待用户确认高风险命令")
+
+            window = tk.Toplevel(self.root)
+            window.title("确认命令执行")
+            window.transient(self.root)
+            window.resizable(False, False)
+            window.configure(bg="#f7f8fa")
+            window.grab_set()
+
+            def _close(allow_execution: bool) -> None:
+                decision["allow"] = allow_execution
+                try:
+                    window.grab_release()
+                except tk.TclError:
+                    pass
+                window.destroy()
+                self._set_runtime_status("")
+                done.set()
+
+            container = ttk.Frame(window, padding=16)
+            container.pack(fill=tk.BOTH, expand=True)
+
+            title = ttk.Label(container, text="检测到高风险命令", font=("Menlo", 11, "bold"))
+            title.pack(anchor=tk.W, pady=(0, 8))
+
+            kind_label = "Shell 命令" if request.kind == "shell" else "Python 代码"
+            ttk.Label(container, text=f"类型: {kind_label}").pack(anchor=tk.W, pady=(0, 4))
+            ttk.Label(container, text=f"原因: {request.reason}", wraplength=520).pack(anchor=tk.W, pady=(0, 8))
+
+            preview_text = tk.Text(container, height=10, width=72, wrap=tk.WORD, font=("Menlo", 9), bg="#fbfcfe")
+            preview_text.insert(tk.END, request.payload)
+            preview_text.configure(state=tk.DISABLED)
+            preview_text.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+
+            button_row = ttk.Frame(container)
+            button_row.pack(fill=tk.X)
+
+            allow_btn = ttk.Button(button_row, text="允许执行", command=lambda: _close(True))
+            allow_btn.pack(side=tk.RIGHT)
+
+            deny_btn = ttk.Button(button_row, text="拦截执行", command=lambda: _close(False))
+            deny_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+            window.protocol("WM_DELETE_WINDOW", lambda: _close(False))
+            window.bind("<Escape>", lambda _event: _close(False))
+            window.bind("<Return>", lambda _event: _close(True))
+            allow_btn.focus_set()
+
+        self.root.after(0, _show_dialog)
+        done.wait()
+        return bool(decision.get("allow", False))
 
     def _append_assistant_delta(self, text: str) -> None:
         """将assistant增量文本追加到同一条消息，避免每个token单独成行。"""

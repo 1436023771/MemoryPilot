@@ -111,6 +111,14 @@ python -m app.mcp.docker_sandbox_server
 
 This server exposes `run_docker_command` and `run_python_in_docker` over MCP, backed by the shared sandbox core in `app/sandbox/docker_runner.py`.
 
+Reading companion MCP server:
+
+```bash
+python -m app.mcp.reading_companion_server --transport streamable-http --host 127.0.0.1 --port 8767 --path /mcp
+```
+
+This server exposes `retrieve_reading_context` and is backed by the same pgvector retrieval pipeline used by `retrieve_pg_knowledge`.
+
 To route agent docker tools through MCP instead of local direct execution:
 
 ```env
@@ -120,6 +128,14 @@ DOCKER_MCP_TIMEOUT=30
 ```
 
 When `DOCKER_MCP_ENABLED=true`, `run_docker_command` and `run_python_code` will call the MCP server path.
+
+To route reading-companion retrieval through MCP first (with local fallback on MCP failure):
+
+```env
+READING_COMPANION_MCP_ENABLED=true
+READING_COMPANION_MCP_SERVER_URL=http://127.0.0.1:8767/mcp
+READING_COMPANION_MCP_TIMEOUT=30
+```
 
 One-command local stack launcher (main app + multiple MCP servers):
 
@@ -209,7 +225,10 @@ Assistant persona behavior:
 
 - Default persona is a general execution-oriented assistant.
 - Reading companion behavior is extracted as a skill and activated on knowledge-route requests.
-- Skill definition is stored at `.github/skills/reading-companion/SKILL.md`.
+- Skills are standardized under `.github/skills/<skill-name>/`.
+- Required file: `.github/skills/<skill-name>/skill.md`.
+- Optional directories: `.github/skills/<skill-name>/scripts/` and `.github/skills/<skill-name>/knowledge/`.
+- Current examples: `.github/skills/general/skill.md` and `.github/skills/reading-companion/skill.md`.
 
 Start desktop chat window (GUI, defaults to short-term + long-term memory):
 

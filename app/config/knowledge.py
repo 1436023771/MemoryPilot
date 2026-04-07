@@ -1,22 +1,17 @@
 """配置层：知识检索和重排相关环境变量读取逻辑。"""
 
-import os
-
-from app.config import get_env_float, get_env_int
+from app.config import get_env_float, get_env_int, get_env_str
 
 
 def pgvector_table() -> str:
-    return os.getenv("PGVECTOR_TABLE", "knowledge_chunks").strip() or "knowledge_chunks"
+    return get_env_str("PGVECTOR_TABLE", "knowledge_chunks") or "knowledge_chunks"
 
 
 def pgvector_embedding_model() -> str:
-    return (
-        os.getenv(
-            "PGVECTOR_EMBEDDING_MODEL",
-            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        ).strip()
-        or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
+    return get_env_str(
+        "PGVECTOR_EMBEDDING_MODEL",
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    ) or "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 
 def local_rerank_weights() -> tuple[float, float, float]:

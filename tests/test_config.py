@@ -1,6 +1,10 @@
 import pytest
 
 from app.config import get_env_bool, get_env_float, get_env_int, get_settings
+from app.config.knowledge import context_window_default as knowledge_context_window_default
+from app.config.knowledge import rerank_candidates_default as knowledge_rerank_candidates_default
+from app.config.langgraph import context_window_default as langgraph_context_window_default
+from app.config.langgraph import rerank_candidates_default as langgraph_rerank_candidates_default
 from app.core.config import get_settings as legacy_get_settings
 
 
@@ -65,3 +69,11 @@ def test_legacy_config_wrapper_matches_new_package(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("MODEL_NAME", "deepseek-chat")
 
     assert get_settings() == legacy_get_settings()
+
+
+def test_langgraph_and_knowledge_defaults_are_consistent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KNOWLEDGE_CONTEXT_WINDOW_DEFAULT", "")
+    monkeypatch.setenv("KNOWLEDGE_RERANK_CANDIDATES_DEFAULT", "")
+
+    assert langgraph_context_window_default() == knowledge_context_window_default()
+    assert langgraph_rerank_candidates_default() == knowledge_rerank_candidates_default()

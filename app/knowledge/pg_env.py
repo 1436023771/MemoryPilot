@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import os
 from urllib.parse import quote_plus
 
-from dotenv import load_dotenv
+from app.config import get_env_str
 
 
 def _build_pg_dsn_from_parts() -> str:
@@ -17,12 +16,12 @@ def _build_pg_dsn_from_parts() -> str:
     - PGVECTOR_PASSWORD (optional)
     - PGVECTOR_SSLMODE (optional)
     """
-    host = os.getenv("PGVECTOR_HOST", "").strip()
-    dbname = os.getenv("PGVECTOR_DBNAME", "").strip()
-    port = os.getenv("PGVECTOR_PORT", "5432").strip() or "5432"
-    user = os.getenv("PGVECTOR_USER", "").strip()
-    password = os.getenv("PGVECTOR_PASSWORD", "").strip()
-    sslmode = os.getenv("PGVECTOR_SSLMODE", "").strip()
+    host = get_env_str("PGVECTOR_HOST", "")
+    dbname = get_env_str("PGVECTOR_DBNAME", "")
+    port = get_env_str("PGVECTOR_PORT", "5432") or "5432"
+    user = get_env_str("PGVECTOR_USER", "")
+    password = get_env_str("PGVECTOR_PASSWORD", "")
+    sslmode = get_env_str("PGVECTOR_SSLMODE", "")
 
     if not host or not dbname:
         return ""
@@ -42,12 +41,10 @@ def _build_pg_dsn_from_parts() -> str:
 
 def resolve_pg_dsn(explicit_dsn: str = "") -> str:
     """Resolve DSN from explicit arg, then PGVECTOR_DSN, then PGVECTOR_* parts."""
-    load_dotenv()
-
     if explicit_dsn.strip():
         return explicit_dsn.strip()
 
-    dsn = os.getenv("PGVECTOR_DSN", "").strip()
+    dsn = get_env_str("PGVECTOR_DSN", "")
     if dsn:
         return dsn
 
@@ -56,8 +53,6 @@ def resolve_pg_dsn(explicit_dsn: str = "") -> str:
 
 def resolve_bookshelf_path(explicit_path: str = "") -> str:
     """Resolve bookshelf path from explicit arg or BOOKSHELF_PATH env."""
-    load_dotenv()
-
     if explicit_path.strip():
         return explicit_path.strip()
-    return os.getenv("BOOKSHELF_PATH", "").strip()
+    return get_env_str("BOOKSHELF_PATH", "")

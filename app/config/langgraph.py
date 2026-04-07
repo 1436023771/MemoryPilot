@@ -1,19 +1,22 @@
 """配置层：LangGraph 流程环境变量读取逻辑。"""
 
-import os
-
-from app.config import get_env_int
+from app.config import get_env_str
+from app.config.knowledge import (
+    context_window_default as knowledge_context_window_default,
+    rerank_candidates_default as knowledge_rerank_candidates_default,
+    top_k_default as knowledge_top_k_default,
+)
 
 
 DEFAULT_MAX_HISTORY_TOKENS = 8000
 
 
 def langchain_project() -> str:
-    return os.getenv("LANGCHAIN_PROJECT", "agent-langgraph").strip() or "agent-langgraph"
+    return get_env_str("LANGCHAIN_PROJECT", "agent-langgraph") or "agent-langgraph"
 
 
 def max_history_tokens() -> int:
-    raw = os.getenv("MAX_HISTORY_TOKENS", str(DEFAULT_MAX_HISTORY_TOKENS)).strip()
+    raw = get_env_str("MAX_HISTORY_TOKENS", str(DEFAULT_MAX_HISTORY_TOKENS))
     try:
         value = int(raw)
         if value < 0:
@@ -24,12 +27,12 @@ def max_history_tokens() -> int:
 
 
 def top_k_default() -> int:
-    return get_env_int("KNOWLEDGE_TOP_K_DEFAULT", default=5, min_value=1)
+    return knowledge_top_k_default()
 
 
 def context_window_default() -> int:
-    return get_env_int("KNOWLEDGE_CONTEXT_WINDOW_DEFAULT", default=3, min_value=0)
+    return knowledge_context_window_default()
 
 
 def rerank_candidates_default() -> int:
-    return get_env_int("KNOWLEDGE_RERANK_CANDIDATES_DEFAULT", default=14, min_value=2)
+    return knowledge_rerank_candidates_default()

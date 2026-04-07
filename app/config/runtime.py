@@ -77,29 +77,41 @@ def get_env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value (true/false).")
 
 
+def get_env_str(name: str, default: str = "", lower: bool = False) -> str:
+    """Read string env var with default and optional lowercase normalization."""
+    _load_environment()
+    raw = os.getenv(name, default)
+    value = str(raw).strip()
+    if not value:
+        value = str(default).strip()
+    if lower:
+        value = value.lower()
+    return value
+
+
 def get_settings() -> Settings:
     """从环境变量读取并校验运行配置。"""
     _load_environment()
 
-    provider = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
+    provider = get_env_str("LLM_PROVIDER", "deepseek", lower=True)
     if provider not in {"openai", "deepseek"}:
         raise ValueError("LLM_PROVIDER must be either 'openai' or 'deepseek'.")
 
     if provider == "deepseek":
-        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        api_key = get_env_str("DEEPSEEK_API_KEY", "")
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek.")
-        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").strip()
+        base_url = get_env_str("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
         default_model = "deepseek-chat"
     else:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        api_key = get_env_str("OPENAI_API_KEY", "")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai.")
-        base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+        base_url = get_env_str("OPENAI_BASE_URL", "") or None
         default_model = "gpt-4.1-mini"
 
-    model_name = os.getenv("MODEL_NAME", default_model).strip()
-    temperature_raw = os.getenv("TEMPERATURE", "0.2").strip()
+    model_name = get_env_str("MODEL_NAME", default_model)
+    temperature_raw = get_env_str("TEMPERATURE", "0.2")
 
     try:
         temperature = float(temperature_raw)

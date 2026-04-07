@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import re
 from typing import Any
@@ -17,11 +16,10 @@ def _load_prompt_map() -> dict[str, str]:
     if _PROMPT_CACHE is not None:
         return _PROMPT_CACHE
 
-    if _PROMPT_FILE.exists():
-        raw = yaml.safe_load(_PROMPT_FILE.read_text(encoding="utf-8"))
-    else:
-        fallback_file = Path(__file__).with_name("prompts.json")
-        raw = json.loads(fallback_file.read_text(encoding="utf-8"))
+    if not _PROMPT_FILE.exists():
+        raise FileNotFoundError(f"Prompt file not found: {_PROMPT_FILE}")
+
+    raw = yaml.safe_load(_PROMPT_FILE.read_text(encoding="utf-8"))
 
     if not isinstance(raw, dict):
         raise ValueError("prompt file must be an object of key/value strings")
