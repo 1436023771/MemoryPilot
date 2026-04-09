@@ -5,7 +5,7 @@ from pathlib import Path
 import pickle
 import re
 
-from app.memory.embeddings import EmbeddingManager
+from app.memory.embeddings import EMBEDDING_MODEL_ID, EmbeddingManager
 from app.memory.read_only_memory import MemoryChunk
 
 
@@ -38,7 +38,7 @@ def init_memory_db(db_path: Path) -> None:
                 fact_id INTEGER NOT NULL UNIQUE,
                 embedding_blob BLOB NOT NULL,
                 vector_dim INTEGER NOT NULL,
-                vector_model TEXT NOT NULL DEFAULT 'tfidf-jieba-v1',
+                vector_model TEXT NOT NULL DEFAULT 'sentence-transformers-multilingual-minilm-v1',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(fact_id) REFERENCES memory_facts(id) ON DELETE CASCADE
@@ -50,7 +50,7 @@ def init_memory_db(db_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS memory_embedding_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 vectorizer_blob BLOB NOT NULL,
-                vector_model TEXT NOT NULL DEFAULT 'tfidf-jieba-v1',
+                vector_model TEXT NOT NULL DEFAULT 'sentence-transformers-multilingual-minilm-v1',
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -59,7 +59,7 @@ def init_memory_db(db_path: Path) -> None:
 
 
 def _rebuild_embeddings(conn: sqlite3.Connection) -> None:
-    """基于当前 memory_facts 全量重建 TF-IDF 向量并写入 memory_embeddings。"""
+    """基于当前 memory_facts 全量重建语义向量并写入 memory_embeddings。"""
     rows = conn.execute(
         """
         SELECT id, fact_text
@@ -68,7 +68,7 @@ def _rebuild_embeddings(conn: sqlite3.Connection) -> None:
         """
     ).fetchall()
 
-    # 清空旧向量，保证词表变化时维度一致。
+    # 清空旧向量，确保与当前 embedding 实现一致。
     conn.execute("DELETE FROM memory_embeddings")
 
     if not rows:
@@ -77,20 +77,19 @@ def _rebuild_embeddings(conn: sqlite3.Connection) -> None:
     fact_ids = [row[0] for row in rows]
     texts = [row[1] for row in rows]
 
-    # SQLite 里可能只有 1 条事实；此时 max_df 需为 1.0 避免阈值冲突。
-    manager = EmbeddingManager(max_df=1.0)
+    manager = EmbeddingManager()
     manager.fit(texts)
 
     conn.execute(
         """
         INSERT INTO memory_embedding_meta (id, vectorizer_blob, vector_model, updated_at)
-        VALUES (1, ?, 'tfidf-jieba-v1', CURRENT_TIMESTAMP)
+        VALUES (1, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
             vectorizer_blob = excluded.vectorizer_blob,
             vector_model = excluded.vector_model,
             updated_at = CURRENT_TIMESTAMP
         """,
-        (manager.dumps(),),
+        (manager.dumps(), EMBEDDING_MODEL_ID),
     )
 
     for fact_id, text in zip(fact_ids, texts):
@@ -99,9 +98,9 @@ def _rebuild_embeddings(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO memory_embeddings (fact_id, embedding_blob, vector_dim, vector_model, updated_at)
-            VALUES (?, ?, ?, 'tfidf-jieba-v1', CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
-            (fact_id, blob, int(vector.shape[0])),
+            (fact_id, blob, int(vector.shape[0]), EMBEDDING_MODEL_ID),
         )
 
 
@@ -222,27 +221,20 @@ def retrieve_memory_context_hybrid_from_sqlite(
         meta = conn.execute(
             "SELECT vectorizer_blob FROM memory_embedding_meta WHERE id = 1"
         ).fetchone()
-
-        # 兼容历史数据库：旧版本 pickle 中可能引用 app.embeddings。
-        # 若反序列化失败，则自动按当前代码重建向量并重试加载。
-        if meta and meta[0]:
-            manager = EmbeddingManager(max_df=1.0)
-            try:
-                manager.loads(meta[0])
-            except ModuleNotFoundError:
-                _rebuild_embeddings(conn)
-                conn.commit()
-                meta = conn.execute(
-                    "SELECT vectorizer_blob FROM memory_embedding_meta WHERE id = 1"
-                ).fetchone()
-                rows = conn.execute(
-                    """
-                    SELECT f.id, f.fact_text, e.embedding_blob
-                    FROM memory_facts f
-                    LEFT JOIN memory_embeddings e ON e.fact_id = f.id
-                    ORDER BY f.updated_at DESC, f.id DESC
-                    """
-                ).fetchall()
+        if rows and (not meta or not meta[0]):
+            _rebuild_embeddings(conn)
+            conn.commit()
+            meta = conn.execute(
+                "SELECT vectorizer_blob FROM memory_embedding_meta WHERE id = 1"
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT f.id, f.fact_text, e.embedding_blob
+                FROM memory_facts f
+                LEFT JOIN memory_embeddings e ON e.fact_id = f.id
+                ORDER BY f.updated_at DESC, f.id DESC
+                """
+            ).fetchall()
 
     if not rows:
         return ""
@@ -257,7 +249,7 @@ def retrieve_memory_context_hybrid_from_sqlite(
     # 向量得分
     vector_scores: dict[int, float] = {fact_id: 0.0 for fact_id, _, _ in rows}
     if meta and meta[0]:
-        manager = EmbeddingManager(max_df=1.0)
+        manager = EmbeddingManager()
         manager.loads(meta[0])
         query_vec = manager.encode(query)
 

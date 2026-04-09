@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import numpy as np
+import pytest
+
+from app.memory.embeddings import EmbeddingManager
 from app.memory.read_only_memory import retrieve_memory_context
 from app.memory.sqlite_memory import (
     load_embeddings_count,
@@ -8,6 +12,28 @@ from app.memory.sqlite_memory import (
     write_facts_to_sqlite,
 )
 from app.memory.write_memory import MemoryFact
+
+
+class _FakeSentenceTransformer:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return 8
+
+    def encode(self, text: str, normalize_embeddings: bool = True):
+        vec = np.zeros(8, dtype=np.float32)
+        for ch in str(text or ""):
+            vec[ord(ch) % 8] += 1.0
+        norm = float(np.linalg.norm(vec))
+        if normalize_embeddings and norm > 0:
+            vec = vec / norm
+        return vec
+
+
+@pytest.fixture(autouse=True)
+def _patch_embedding_model(monkeypatch):
+    monkeypatch.setattr(EmbeddingManager, "_load_model", staticmethod(lambda _name: _FakeSentenceTransformer(_name)))
 
 
 def _fact(key: str, value: str, text: str) -> MemoryFact:

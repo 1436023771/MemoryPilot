@@ -1,136 +1,69 @@
-"""
-向量化模块：使用TF-IDF实现轻量级的中文文本向量化和相似度计算。
-无需PyTorch依赖，适合Python 3.13环境。
-"""
+"""向量化模块：使用 sentence-transformers 生成语义向量。"""
 
 from __future__ import annotations
 
-import pickle
+import json
 from pathlib import Path
 
-import jieba
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
+
+
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+EMBEDDING_MODEL_ID = "sentence-transformers-multilingual-minilm-v1"
 
 
 class EmbeddingManager:
-    """
-    基于TF-IDF的轻量级embedding管理器。
-    优点：
-    - 无PyTorch/transformers依赖，轻量级
-    - 支持中文分词（jieba）
-    - 快速向量化和相似度计算
-    
-    缺点：
-    - 相比预训练NLP模型，语义理解能力较弱
-    - 需要建立全局词汇表
-    """
+    """基于 sentence-transformers 的语义向量管理器。"""
 
     def __init__(
         self,
-        max_features: int = 5000,
-        min_df: int = 1,
-        max_df: float = 0.95,
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
+        **_unused: object,
     ):
-        """
-        初始化EmbeddingManager。
-        
-        Args:
-            max_features: 最多保留的词汇数
-            min_df: 最少文档频率（词最少要出现在N个文档中）
-            max_df: 最大文档频率（词最多出现在该比例的文档中）
-        """
-        self.vectorizer = TfidfVectorizer(
-            analyzer=self._tokenize,
-            max_features=max_features,
-            min_df=min_df,
-            max_df=max_df,
-            norm="l2",  # L2归一化，便于余弦相似度计算
-        )
+        self.model_name = model_name
+        self._model = self._load_model(model_name)
         self.is_fitted = False
         self._cached_vectors: dict[str, np.ndarray] = {}
+        self._vector_dim = int(self._model.get_sentence_embedding_dimension())
 
     @staticmethod
-    def _tokenize(text: str) -> list[str]:
-        """
-        将文本分词，支持中英文混合。
-        
-        Args:
-            text: 输入文本
-            
-        Returns:
-            分词结果列表
-        """
-        # 使用 jieba 分词，保持中文词汇完整
-        tokens = jieba.cut(text.lower())
-        
-        # 过滤掉单字符中文和特殊符号（保留有意义的词）
-        filtered = []
-        for token in tokens:
-            token = token.strip()
-            if not token or len(token) == 0:
-                continue
-            # 过滤掉纯符号或单个汉字（除非是常见单字如"是"、"的"）
-            if len(token) == 1 and ord(token) >= 0x4e00 and ord(token) <= 0x9fff:
-                # 单个汉字 - 保留某些常见的
-                if token not in {"的", "是", "在", "了", "个"}:
-                    continue
-            filtered.append(token)
-        
-        return filtered
+    def _load_model(model_name: str):
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "sentence-transformers is required. Install with: pip install sentence-transformers"
+            ) from exc
+        return SentenceTransformer(model_name)
 
     def fit(self, texts: list[str]):
-        """
-        基于输入文本拟合TF-IDF词汇表。
-        必须在encode前调用一次。
-        
-        Args:
-            texts: 用于拟合的文本列表
-        """
+        """保留旧接口。sentence-transformers 无需拟合，但要求输入非空。"""
         if not texts:
             raise ValueError("Cannot fit with empty text list")
-        
-        self.vectorizer.fit(texts)
+
         self.is_fitted = True
         self._cached_vectors.clear()
 
     def encode(self, text: str) -> np.ndarray:
-        """
-        将文本编码为TF-IDF向量。
-        
-        Args:
-            text: 输入文本
-            
-        Returns:
-            稀疏矩阵转换的稠密向量 (float32)
-        """
+        """将文本编码为归一化语义向量。"""
         if not self.is_fitted:
-            raise RuntimeError("Vectorizer not fitted. Call fit() first.")
-        
-        # 检查缓存
+            raise RuntimeError("Embedding model not initialized. Call fit() first.")
+
         if text in self._cached_vectors:
             return self._cached_vectors[text]
-        
-        # 向量化
-        vec = self.vectorizer.transform([text]).toarray()[0].astype(np.float32)
-        
-        # 缓存
+
+        vec = self._model.encode(str(text or ""), normalize_embeddings=True)
+        vec = np.asarray(vec, dtype=np.float32)
+        self._vector_dim = int(vec.shape[0]) if vec.ndim == 1 else self._vector_dim
+
         self._cached_vectors[text] = vec
         return vec
 
     def similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """
-        计算两个向量的余弦相似度。
-        
-        Args:
-            vec1: 第一个向量
-            vec2: 第二个向量
-            
-        Returns:
-            相似度得分 [0, 1]
-        """
-        # L2 归一化下的余弦相似度等于向量点积
-        return float(np.dot(vec1, vec2))
+        """计算归一化向量的余弦相似度。"""
+        left = np.asarray(vec1, dtype=np.float32)
+        right = np.asarray(vec2, dtype=np.float32)
+        return float(np.dot(left, right))
 
     def bulk_similarity(
         self,
@@ -154,44 +87,51 @@ class EmbeddingManager:
         return similarities
 
     def save(self, path: Path):
-        """保存向量化器状态到文件。"""
+        """保存 embedding 配置到文件。"""
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
-            pickle.dump(self.vectorizer, f)
+            f.write(self.dumps())
 
     def load(self, path: Path):
-        """从文件加载向量化器状态。"""
+        """从文件加载 embedding 配置。"""
         if not path.exists():
             raise FileNotFoundError(f"Embeddings file not found: {path}")
-        
+
         with open(path, "rb") as f:
-            self.vectorizer = pickle.load(f)
-        self.is_fitted = True
+            self.loads(f.read())
 
     def dumps(self) -> bytes:
-        """将向量化器序列化为内存字节。"""
+        """将 embedding 配置序列化为字节。"""
         if not self.is_fitted:
-            raise RuntimeError("Vectorizer not fitted. Call fit() first.")
-        return pickle.dumps(self.vectorizer)
+            raise RuntimeError("Embedding model not initialized. Call fit() first.")
+        payload = {
+            "model_name": self.model_name,
+            "model_id": EMBEDDING_MODEL_ID,
+            "vector_dim": self.get_vector_dim(),
+        }
+        return json.dumps(payload, ensure_ascii=True).encode("utf-8")
 
     def loads(self, blob: bytes):
-        """从内存字节反序列化向量化器。"""
-        self.vectorizer = pickle.loads(blob)
+        """从内存字节反序列化 embedding 配置。"""
+        data = json.loads(bytes(blob).decode("utf-8"))
+        loaded_model_name = str(data.get("model_name") or DEFAULT_EMBEDDING_MODEL)
+        self.model_name = loaded_model_name
+        self._model = self._load_model(self.model_name)
+        self._vector_dim = int(self._model.get_sentence_embedding_dimension())
         self.is_fitted = True
         self._cached_vectors.clear()
 
     def get_vocab_size(self) -> int:
-        """获取当前词汇表大小。"""
+        """兼容旧接口：返回向量维度。"""
         if not self.is_fitted:
             return 0
-        return len(self.vectorizer.get_feature_names_out())
+        return self.get_vector_dim()
 
     def get_vector_dim(self) -> int:
         """获取向量维度。"""
         if not self.is_fitted:
             return 0
-        # TF-IDF向量维度 = 词汇表大小
-        return len(self.vectorizer.get_feature_names_out())
+        return int(self._vector_dim)
 
 
 def create_and_fit_embedding_manager(corpus: list[str]) -> EmbeddingManager:

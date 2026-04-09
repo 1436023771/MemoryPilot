@@ -4,8 +4,31 @@
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 from app.memory.embeddings import EmbeddingManager, create_and_fit_embedding_manager
+
+
+class _FakeSentenceTransformer:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return 8
+
+    def encode(self, text: str, normalize_embeddings: bool = True):
+        vec = np.zeros(8, dtype=np.float32)
+        for ch in str(text or ""):
+            vec[ord(ch) % 8] += 1.0
+        norm = float(np.linalg.norm(vec))
+        if normalize_embeddings and norm > 0:
+            vec = vec / norm
+        return vec
+
+
+@pytest.fixture(autouse=True)
+def _patch_embedding_model(monkeypatch):
+    monkeypatch.setattr(EmbeddingManager, "_load_model", staticmethod(lambda _name: _FakeSentenceTransformer(_name)))
 
 
 class TestEmbeddingManager:
@@ -55,7 +78,7 @@ class TestEmbeddingManager:
         vec3 = manager.encode("天气很好")
         similarity_diff_topic = manager.similarity(vec1, vec3)
         
-        # 从训练集中的完整句子应该有高自相似度
+        # 相同文本的向量应该有高自相似度
         vec_full = manager.encode("我叫小李，我是小李")
         vec_full_again = manager.encode("我叫小李，我是小李")
         similarity_same_full = manager.similarity(vec_full, vec_full_again)
@@ -82,7 +105,7 @@ class TestEmbeddingManager:
         similarities = manager.bulk_similarity(query_vec, candidates)
         
         assert len(similarities) == len(corpus)
-        assert all(0 <= sim <= 1 for sim in similarities)
+        assert all(-1 <= sim <= 1 for sim in similarities)
 
     def test_cache(self):
         """测试向量缓存。"""
@@ -126,5 +149,4 @@ class TestEmbeddingManager:
         vec2 = manager2.encode("我叫小李")
         
         # 应该是相同的向量（或非常接近）
-        import numpy as np
         assert np.allclose(vec1, vec2)
