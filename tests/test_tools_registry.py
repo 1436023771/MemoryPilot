@@ -7,11 +7,15 @@ def test_registry_auto_exports_core_tools() -> None:
     assert "run_python_code" in tools_registry.__all__
     assert "run_docker_command" in tools_registry.__all__
     assert "retrieve_pg_knowledge" in tools_registry.__all__
+    assert "translate_light_novel_ja_to_zh" in tools_registry.__all__
+    assert "translate_light_novel_batch" in tools_registry.__all__
 
     assert hasattr(tools_registry, "web_search")
     assert hasattr(tools_registry, "run_python_code")
     assert hasattr(tools_registry, "run_docker_command")
     assert hasattr(tools_registry, "retrieve_pg_knowledge")
+    assert hasattr(tools_registry, "translate_light_novel_ja_to_zh")
+    assert hasattr(tools_registry, "translate_light_novel_batch")
 
 
 def test_registry_keeps_helper_exports() -> None:
@@ -30,6 +34,8 @@ def test_tool_registry_filters_to_callable_tools() -> None:
     assert "run_python_code" in tool_names
     assert "run_docker_command" in tool_names
     assert "retrieve_pg_knowledge" in tool_names
+    assert "translate_light_novel_ja_to_zh" in tool_names
+    assert "translate_light_novel_batch" in tool_names
     assert "get_search_log" not in tool_names
 
 

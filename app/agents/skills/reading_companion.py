@@ -43,12 +43,16 @@ class ReadingCompanionSkill(Skill):
                 "retrieve_pg_knowledge",  # Book/knowledge base retrieval
                 "run_python_code",        # Data processing for narrative analysis
                 "run_docker_command",     # Advanced processing if needed
+                "translate_light_novel_ja_to_zh",  # Japanese light novel translation
+                "translate_light_novel_batch",  # Batch directory translation
                 # Note: web_search is excluded to prioritize internal knowledge base
             ],
             tool_display_names={
                 "retrieve_pg_knowledge": "书籍检索",
                 "run_python_code": "数据处理",
                 "run_docker_command": "高级计算",
+                "translate_light_novel_ja_to_zh": "轻小说翻译",
+                "translate_light_novel_batch": "批量翻译",
             },
         )
         super().__init__(config)

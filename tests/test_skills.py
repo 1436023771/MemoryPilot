@@ -69,10 +69,12 @@ class TestReadingCompanionSkill:
         # Should NOT have web_search
         assert "web_search" not in allowed_tools
         
-        # Should have knowledge, python, docker
+        # Should have knowledge, python, docker, and translation tools
         assert "retrieve_pg_knowledge" in allowed_tools
         assert "run_python_code" in allowed_tools
         assert "run_docker_command" in allowed_tools
+        assert "translate_light_novel_ja_to_zh" in allowed_tools
+        assert "translate_light_novel_batch" in allowed_tools
 
     def test_reading_companion_should_activate_with_keywords(self):
         """Verify keyword-based activation."""
@@ -96,6 +98,8 @@ class TestReadingCompanionSkill:
         assert display_names.get("retrieve_pg_knowledge") == "书籍检索"
         assert display_names.get("run_python_code") == "数据处理"
         assert display_names.get("run_docker_command") == "高级计算"
+        assert display_names.get("translate_light_novel_ja_to_zh") == "轻小说翻译"
+        assert display_names.get("translate_light_novel_batch") == "批量翻译"
 
 
 class TestGeneralSkill:
@@ -119,6 +123,8 @@ class TestGeneralSkill:
         assert "retrieve_pg_knowledge" in allowed_tools
         assert "run_python_code" in allowed_tools
         assert "run_docker_command" in allowed_tools
+        assert "translate_light_novel_ja_to_zh" in allowed_tools
+        assert "translate_light_novel_batch" in allowed_tools
 
     def test_general_skill_tool_display_names(self):
         """Verify general skill uses Chinese display names."""
@@ -129,6 +135,8 @@ class TestGeneralSkill:
         assert display_names.get("retrieve_pg_knowledge") == "知识库检索"
         assert display_names.get("run_python_code") == "Python计算器"
         assert display_names.get("run_docker_command") == "Docker沙箱"
+        assert display_names.get("translate_light_novel_ja_to_zh") == "轻小说日译中"
+        assert display_names.get("translate_light_novel_batch") == "轻小说批量翻译"
 
 
 class TestSkillContextProcessing:
@@ -180,13 +188,19 @@ class TestSkillRuntimeHelpers:
         assert "retrieve_pg_knowledge" in reading_tools
         assert "run_python_code" in reading_tools
         assert "run_docker_command" in reading_tools
+        assert "translate_light_novel_ja_to_zh" in reading_tools
+        assert "translate_light_novel_batch" in reading_tools
 
         assert "web_search" in general_tools
         assert "retrieve_pg_knowledge" in general_tools
+        assert "translate_light_novel_ja_to_zh" in general_tools
+        assert "translate_light_novel_batch" in general_tools
 
     def test_resolve_tool_display_name_prefers_skill_custom_name(self):
         assert resolve_tool_display_name("reading-companion", "run_python_code") == "数据处理"
         assert resolve_tool_display_name("reading-companion", "run_docker_command") == "高级计算"
+        assert resolve_tool_display_name("reading-companion", "translate_light_novel_ja_to_zh") == "轻小说翻译"
+        assert resolve_tool_display_name("reading-companion", "translate_light_novel_batch") == "批量翻译"
 
     def test_resolve_prompt_key_uses_skill_override(self):
         assert (

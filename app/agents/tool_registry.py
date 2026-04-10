@@ -64,6 +64,8 @@ class ToolRegistry:
             "run_docker_command": "Docker沙箱",
             "web_search": "联网搜索",
             "retrieve_pg_knowledge": "知识库检索",
+            "translate_light_novel_ja_to_zh": "轻小说日译中",
+            "translate_light_novel_batch": "轻小说批量翻译",
         }
         return defaults.get(tool_name, tool_name)
 
